@@ -21,23 +21,31 @@ from .ringbuffer import RingBuffer
 
 @dataclass
 class EmgBlock:
-    data: np.ndarray            # (8, n) float32
+    data: np.ndarray            # (8, n) float32, NaN where not valid
+    valid: np.ndarray           # (8, n) bool, False for lost samples / missing channels
     sample_index: np.ndarray    # (n,) int64, device sample counter
-    device_time: np.ndarray     # (n,) float64, SDK absolute timestamp (s)
-    lost: np.ndarray            # (n,) bool, sample was lost in transit (zero-filled)
-    host_time: float            # time.time() when the batch reached the host
+    device_time: np.ndarray     # (n,) float64, SDK timestamp (= index / nominal rate, not a clock)
+    lost: np.ndarray            # (n,) bool, SDK reported the sample lost in transit
+    host_time: float            # time.time() when the batch reached the host (for alignment)
+    host_mono: float            # time.monotonic() at the same moment (for durations/latency)
     sample_rate: float
-    impedance: Optional[np.ndarray] = None   # (8,) Ohm, latest per channel
+    impedance: Optional[np.ndarray] = None   # (8,) Ohm, latest per channel, NaN if unknown
     lost_packages: int = 0
+    stream_id: int = 0          # changes on every (re)connection / stream start
+    segment: int = 0            # assigned by the hub: continuous run of sample indices
 
 
 @dataclass
 class ImuBlock:
-    data: np.ndarray            # (6, n) float32: ACC xyz, GYRO xyz
+    data: np.ndarray            # (6, n) float32: ACC xyz, GYRO xyz, NaN where not valid
+    valid: np.ndarray           # (6, n) bool
     sample_index: np.ndarray
     device_time: np.ndarray
     host_time: float
+    host_mono: float
     sample_rate: float
+    stream_id: int = 0
+    segment: int = 0
 
 
 class _RateMeter:
@@ -83,14 +91,14 @@ class DataHub:
         self._imu_subscribers: List[Callable[[ImuBlock], None]] = []
 
     # -- subscription ---------------------------------------------------------
-    def subscribe_emg(self, fn: Callable[[EmgBlock], None]):
+    def subscribe_emg(self, fn: Callable[[EmgBlock], None], name: Optional[str] = None):
         self._emg_subscribers.append(fn)
 
     def unsubscribe_emg(self, fn):
         if fn in self._emg_subscribers:
             self._emg_subscribers.remove(fn)
 
-    def subscribe_imu(self, fn: Callable[[ImuBlock], None]):
+    def subscribe_imu(self, fn: Callable[[ImuBlock], None], name: Optional[str] = None):
         self._imu_subscribers.append(fn)
 
     def unsubscribe_imu(self, fn):

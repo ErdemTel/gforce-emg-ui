@@ -270,8 +270,10 @@ class SdkSource(Source):
             device_time=arr["absTimeStampInSec"][0].copy(),
             lost=arr["isLost"][0] != 0,
             host_time=host_time,
+            host_mono=time.monotonic(),
             sample_rate=float(data.sampleRate),
             impedance=imp,
+            valid=np.ones_like(values, bool),
             lost_packages=int(data.lostPackageCount),
         )
 
@@ -287,7 +289,9 @@ class SdkSource(Source):
             sample_index=arr["sampleIndex"][0].astype(np.int64),
             device_time=arr["absTimeStampInSec"][0].copy(),
             host_time=host_time,
+            host_mono=time.monotonic(),
             sample_rate=float(data.sampleRate),
+            valid=np.ones_like(values, bool),
         )
 
     def shutdown(self):
@@ -313,9 +317,10 @@ class SimSource(Source):
     IMU_RATE = 50
 
     def __init__(self, hub: DataHub, emg_rate: int = DEFAULT_EMG_RATE,
-                 package_samples: int = PACKAGE_SAMPLE_COUNT):
+                 package_samples: int = PACKAGE_SAMPLE_COUNT, seed=None):
         super().__init__(hub, emg_rate)
         self._package = package_samples
+        self._seed = seed
         self._thread = None
         self._stop = threading.Event()
         self._filters = {k: False for k in FILTERS}
@@ -376,7 +381,7 @@ class SimSource(Source):
         self._stop.set()
 
     def _run(self):
-        rng = np.random.default_rng()
+        rng = np.random.default_rng(self._seed)
         emg_idx = 0
         imu_idx = 0
         t0 = time.time()
@@ -407,8 +412,10 @@ class SimSource(Source):
                 device_time=t0 + ts,
                 lost=np.zeros(n, bool),
                 host_time=now,
+                host_mono=time.monotonic(),
                 sample_rate=float(rate),
                 impedance=imp,
+                valid=np.ones((EMG_CHANNELS, n), bool),
             ))
             emg_idx += n
 
@@ -424,7 +431,8 @@ class SimSource(Source):
                 self.hub.push_imu(ImuBlock(
                     data=np.vstack([acc, gyro]).astype(np.float32),
                     sample_index=np.arange(imu_idx, imu_idx + m, dtype=np.int64),
-                    device_time=t0 + ti, host_time=now, sample_rate=float(self.IMU_RATE)))
+                    device_time=t0 + ti, host_time=now, host_mono=time.monotonic(),
+                    sample_rate=float(self.IMU_RATE), valid=np.ones((6, m), bool)))
                 imu_idx += m
 
             next_t += n / rate

@@ -12,7 +12,7 @@ from ..config import (EMG_CHANNELS, EMG_RATES, FILTERS, PLOT_INTERVAL_MS,
                       STATUS_INTERVAL_MS)
 from ..contact import LEVEL_COLORS, contact_color, format_kohm
 from ..hub import DataHub
-from ..recorder import Recorder
+from ..recorder import ERROR, FINALIZING, RECORDING, SAVED, Recorder
 from ..sources import Source
 from .emg_detail import DetailDashboard
 from .emg_equal import EqualScaleDashboard
@@ -60,6 +60,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.current_params = {}
         self._devices = {}
         self._age_ms = 0.0
+        self._close_pending = False
+        self._finalizing_seen = False
         self.setWindowTitle(f"gForce EMG UI {__version__}")
         self.resize(1500, 950)
 
@@ -209,10 +211,12 @@ class MainWindow(QtWidgets.QMainWindow):
         connected = self.source.is_connected
         self.btn_connect.setEnabled(not connected and self.device_list.currentItem() is not None)
         self.btn_disconnect.setEnabled(connected)
-        self.btn_record.setEnabled(connected or self.recorder.active)
+        finalizing = self.recorder.busy and not self.recorder.active
+        self.btn_record.setEnabled((connected or self.recorder.active) and not finalizing)
+        self.btn_record.setText("■ Stop recording" if self.recorder.active else "● Start recording")
         self.btn_marker.setEnabled(self.recorder.active)
         for rb in self.rate_buttons.values():
-            rb.setEnabled(not self.recorder.active)
+            rb.setEnabled(not self.recorder.busy)
 
     # -- device -----------------------------------------------------------------
     def _scan(self):
@@ -305,25 +309,56 @@ class MainWindow(QtWidgets.QMainWindow):
             self.folder_label.setText(d)
 
     def _toggle_recording(self):
+        """Start, or request stop (non-blocking; the status timer reports the outcome)."""
         if self.recorder.active:
-            folder = self.recorder.stop()
-            self.btn_record.setText("● Start recording")
-            self.record_label.setText(f"Saved: {folder}")
-            self._set_status(f"Recording saved to {folder}")
-        else:
+            self.recorder.stop()
+            self._set_status("Finalizing recording…")
+        elif not self.recorder.busy:
             meta = {"device": self.device_summary,
                     "emg_rate": self.hub.emg_rate,
                     "imu_rate": self.hub.imu_rate,
                     "onboard_filters": self.current_params.get("filters", {})}
-            folder = self.recorder.start(self.session_name.text(), meta)
-            self.btn_record.setText("■ Stop recording")
-            self._set_status(f"Recording to {folder}")
+            try:
+                session = self.recorder.start(self.session_name.text(), meta)
+            except Exception as e:
+                self._on_error(f"Could not start recording: {e}")
+                return
+            self._set_status(f"Recording to {session.folder}")
+        self._update_record_label()
         self._update_buttons()
+
+    def _update_record_label(self):
+        s = self.recorder.session
+        if s is None:
+            self.record_label.setText("Idle")
+            return
+        emg = s.counts["emg"]
+        if s.state == RECORDING:
+            self.record_label.setText(
+                f"<b style='color:#c62828'>● REC</b> {s.elapsed:6.1f} s · "
+                f"{emg['written']}/{emg['received']} EMG samples written · "
+                f"{s.counts['markers']['received']} markers")
+        elif s.state == FINALIZING:
+            self.record_label.setText(
+                f"Finalizing… {emg['written']}/{emg['enqueued']} EMG samples written")
+        elif s.state == SAVED:
+            self.record_label.setText(
+                f"<b style='color:#2e7d32'>Saved</b> {s.folder}<br>"
+                f"{emg['written']} EMG / {s.counts['imu']['written']} IMU samples, "
+                f"{s.counts['markers']['written']} markers, {s.elapsed:.1f} s")
+        elif s.state == ERROR:
+            suffix = " (still recording)" if s.accepting else ""
+            self.record_label.setText(
+                f"<b style='color:#c62828'>ERROR{suffix}:</b> {s.error}<br>"
+                f"written {emg['written']} / received {emg['received']} EMG samples, "
+                f"dropped {emg['dropped']} · {s.folder}")
+        self.record_label.setWordWrap(True)
 
     def _add_marker(self):
         if not self.recorder.active:
             return
-        label = self.marker_edit.text().strip() or f"marker{self.recorder.markers + 1}"
+        n = self.recorder.session.counts["markers"]["received"]
+        label = self.marker_edit.text().strip() or f"marker{n + 1}"
         self.recorder.add_marker(label)
         self._set_status(f"Marker '{label}' added")
 
@@ -342,10 +377,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.contact_strip.update_contact(imp)
         self.equal.update_contact(imp)
         self.detail.update_contact(imp)
-        if self.recorder.active:
-            self.record_label.setText(
-                f"<b style='color:#c62828'>REC</b> {self.recorder.elapsed:6.1f} s · "
-                f"{self.recorder.emg_samples} EMG samples · {self.recorder.markers} markers")
+        self._update_record_label()
+        if self._finalizing_seen and not self.recorder.busy:
+            self._finalizing_seen = False
+            self._update_buttons()
+            if self._close_pending:
+                self.close()
+                return
+        if self.recorder.busy and not self.recorder.active:
+            self._finalizing_seen = True
         connected = self.source.is_connected
         if not connected:
             self.status_text.setText(f"backend: {self.source.backend_name() or '--'} · not streaming")
@@ -367,9 +407,16 @@ class MainWindow(QtWidgets.QMainWindow):
             f"backend {self.device_summary.get('backend', '')}")
 
     def closeEvent(self, event):
+        if self.recorder.busy:
+            # Never block the event loop on the writer: stop, keep the window
+            # until the status timer sees the session finish, then close.
+            self.recorder.stop()
+            self._close_pending = True
+            self._finalizing_seen = True
+            self._set_status("Finishing the recording before closing…")
+            event.ignore()
+            return
         self.plot_timer.stop()
         self.status_timer.stop()
-        if self.recorder.active:
-            self.recorder.stop()
         self.source.shutdown()
         event.accept()
