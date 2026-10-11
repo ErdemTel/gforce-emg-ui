@@ -82,6 +82,24 @@ control, **fingertip force estimation**, **compliance estimation** (muscle co-co
 - Real-band test: connect/stream/battery/params/disconnect all work via the UI's SdkSource. Found ~505 Hz effective EMG
   rate and 150 ms delivery bursts (see *Hardware findings*). Added red status-bar warning when actual ≠ nominal rate.
 
+### 2026-10-11 (hardening, branch `hardening`)
+- Added 36 failing regression tests first (commit 7657f62), then fixed in 4 commits:
+  recording lifecycle (af9ed6b), data integrity (376c214), measurement consistency (7fac69d),
+  reliability/performance + benchmark (ead5a90). Full suite: 40 passed, 5/5 repeated runs.
+- Recording: per-session queue/ID/markers, SAVED only after writer confirmation, ERROR on writer
+  exception/overflow, reconciled received/enqueued/dropped/written/rejected counts, non-blocking stop.
+- Integrity: NaN + valid masks (no zero padding), segments + index gaps, settings locked while recording,
+  CSV %.9g + empty cells, NaN-equal contact logging.
+- Measurement: RMS from hub independent of view; "% = share of summed RMS"; monotonic timing;
+  status shows host-only callback→draw age and "sensor→host latency: not measured".
+- Reliability: isolated subscribers + subscribe_emg_async, connection states + reconnect + failed-connect
+  cleanup (tested with fake SDK + simulator), redraw skipping, `python -m gforce_emg_ui.bench`.
+- Bug found by the tests: hub unsubscribe used `is` on bound methods → closed sessions stayed subscribed.
+- Benchmark (simulator, host only, this machine): push_emg p50 6 µs / p99 15 µs / max 5.7 ms; recorder
+  80k samples reconciled, stop call 0.01 ms; refresh+paint p50 9.8 / 3.6 / 2.3 ms (equal/detail/IMU).
+- NOT yet verified on the physical band: reconnection path, end-to-end latency, loss behaviour.
+- Next: test the hardening branch with the band, then merge into main.
+
 ## Remote workflow
 
 - Primary: `ssh undergrads@128.32.164.118` → `tmux new -As emg` → `cd ~/erdem/gforce-emg-ui && claude --continue`.
