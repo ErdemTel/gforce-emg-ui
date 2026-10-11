@@ -10,7 +10,10 @@ from PyQt5 import QtWidgets
 
 from ..config import CHANNEL_COLORS, EMG_CHANNELS, FFT_INTERVAL_S
 from ..contact import contact_color, format_kohm
+from ..features import trailing_valid_run
 from ..hub import DataHub
+
+MIN_FFT_SAMPLES = 64
 
 
 class DetailDashboard(QtWidgets.QWidget):
@@ -87,27 +90,36 @@ class DetailDashboard(QtWidgets.QWidget):
         if x is None:
             x = (np.arange(data.shape[1]) - (data.shape[1] - 1)) / rate
             self._x_cache = {key: x}
-        mn = data.min(axis=1)
-        mx = data.max(axis=1)
         for ch in range(EMG_CHANNELS):
-            self.wave_curves[ch].setData(x, data[ch], skipFiniteCheck=True)
-            lo, hi = float(mn[ch]), float(mx[ch])
+            y = data[ch]
+            self.wave_curves[ch].setData(x, y, connect="finite")   # NaN -> visible gap
+            finite = y[np.isfinite(y)]
+            if finite.size == 0:
+                continue
+            lo, hi = float(finite.min()), float(finite.max())
             if lo == hi:
                 lo, hi = lo - 1, hi + 1
             margin = max((hi - lo) * 0.1, 0.01)
             self.wave_plots[ch].setYRange(lo - margin, hi + margin, padding=0)
         self.wave_plots[0].setXRange(x[0], 0, padding=0)
 
-        now = time.time()
+        now = time.monotonic()
         if now - self._last_fft >= FFT_INTERVAL_S:
             self._last_fft = now
-            seg = data[:, -int(rate):].astype(np.float64)       # last 1 s
-            seg = seg - seg.mean(axis=1, keepdims=True)
-            win = np.hanning(seg.shape[1])
-            mags = np.abs(np.fft.rfft(seg * win, axis=1)) / max(win.sum(), 1e-12) * 2
-            freqs = np.fft.rfftfreq(seg.shape[1], d=1.0 / rate)
+            self._update_fft(data[:, -int(rate):], rate)       # last 1 s
+            self.fft_plots[0].setXRange(0, rate / 2, padding=0)
+
+    def _update_fft(self, seg, rate):
+        """Spectrum of each channel's trailing run of valid samples (no NaN filling)."""
+        for ch in range(EMG_CHANNELS):
+            run = trailing_valid_run(seg[ch])
+            if run < MIN_FFT_SAMPLES:
+                self.fft_curves[ch].setData([], [])
+                continue
+            y = seg[ch, -run:].astype(np.float64)
+            y = y - y.mean()
+            win = np.hanning(run)
+            mags = np.abs(np.fft.rfft(y * win)) / max(win.sum(), 1e-12) * 2
             if self.log_check.isChecked():
                 mags = np.maximum(mags, 1e-6)
-            for ch in range(EMG_CHANNELS):
-                self.fft_curves[ch].setData(freqs, mags[ch], skipFiniteCheck=True)
-            self.fft_plots[0].setXRange(0, rate / 2, padding=0)
+            self.fft_curves[ch].setData(np.fft.rfftfreq(run, d=1.0 / rate), mags)

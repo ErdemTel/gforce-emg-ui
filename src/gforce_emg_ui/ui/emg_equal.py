@@ -7,6 +7,7 @@ from PyQt5 import QtCore, QtWidgets
 
 from ..config import CHANNEL_COLORS, EMG_CHANNELS
 from ..contact import contact_color, format_kohm
+from ..features import ac_rms, nan_center
 from ..hub import DataHub
 
 
@@ -17,6 +18,7 @@ class EqualScaleDashboard(QtWidgets.QWidget):
         self._x_cache = {}
         self._yrange = 50.0
         self._rms_peak = 10.0
+        self.last_rms = np.full(EMG_CHANNELS, np.nan)
 
         # -- toolbar --
         self.window_combo = QtWidgets.QComboBox()
@@ -132,18 +134,21 @@ class EqualScaleDashboard(QtWidgets.QWidget):
         if data.shape[1] < 2:
             return
         if self.dc_check.isChecked():
-            data = data - data.mean(axis=1, keepdims=True)
+            data = nan_center(data)
         x = self._x(data.shape[1], rate)
         for ch, curve in enumerate(self.curves):
-            curve.setData(x, data[ch], skipFiniteCheck=True)
+            # NaN = invalid / missing sample: drawn as an explicit gap
+            curve.setData(x, data[ch], connect="finite")
 
         # Shared y-range: fast attack, slow release so the scale is stable
         if self.auto_check.isChecked():
-            target = max(float(np.abs(data).max()) * 1.05, 1e-3)
-            if target > self._yrange:
-                self._yrange = target
-            else:
-                self._yrange = 0.97 * self._yrange + 0.03 * target
+            finite = np.abs(data[np.isfinite(data)])
+            if finite.size:
+                target = max(float(finite.max()) * 1.05, 1e-3)
+                if target > self._yrange:
+                    self._yrange = target
+                else:
+                    self._yrange = 0.97 * self._yrange + 0.03 * target
             yr = self._yrange
         else:
             yr = self.range_spin.value()
@@ -152,19 +157,24 @@ class EqualScaleDashboard(QtWidgets.QWidget):
             p.setYRange(-yr, yr, padding=0)
 
         m = max(2, int(self.rms_combo.currentData() * rate / 1000))
-        seg = data[:, -m:]
-        if not self.dc_check.isChecked():
-            seg = seg - seg.mean(axis=1, keepdims=True)
-        rms = np.sqrt(np.mean(seg.astype(np.float64) ** 2, axis=1))
-        top = int(np.argmax(rms))
+        rms = ac_rms(data[:, -m:])                  # invalid samples excluded
+        self._show_rms(rms)
+
+    def _show_rms(self, rms):
+        self.last_rms = rms
+        finite = np.isfinite(rms)
+        heights = np.where(finite, rms, 0.0)
         brushes = list(self._brushes)
-        brushes[top] = pg.mkBrush("#000000")
-        self.bars.setOpts(height=rms, brushes=brushes)
-        peak = float(rms.max()) * 1.2
+        top = int(np.nanargmax(rms)) if finite.any() else None
+        if top is not None:
+            brushes[top] = pg.mkBrush("#000000")
+        self.bars.setOpts(height=heights, brushes=brushes)
+        peak = float(heights.max()) * 1.2
         self._rms_peak = max(peak, 0.98 * self._rms_peak, 1e-3)
         self.rms_plot.setYRange(0, self._rms_peak, padding=0)
-        total = float(rms.sum()) or 1.0
+        total = float(heights.sum()) or 1.0
         for i, t in enumerate(self.bar_texts):
-            t.setText(f"{rms[i]:.0f}\n{100 * rms[i] / total:.0f}%")
-            t.setPos(i, rms[i])
-        self.top_label.setText(f"Strongest: CH{top + 1}  ({rms[top]:.0f} RMS)")
+            t.setText(f"{rms[i]:.0f}\n{100 * rms[i] / total:.0f}%" if finite[i] else "n/a")
+            t.setPos(i, heights[i])
+        self.top_label.setText(f"Strongest: CH{top + 1}  ({rms[top]:.0f} RMS)"
+                               if top is not None else "Strongest: --")

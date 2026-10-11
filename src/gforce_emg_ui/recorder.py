@@ -14,13 +14,20 @@ Per stream (emg/imu samples, markers) the session counts:
 
 Layout of one session folder (data/<YYYYmmdd_HHMMSS>[_<name>][-N]/):
   session.json  id, device + settings, state, error, counts
-  emg.csv       sample_index, device_time, host_time, lost, ch1..ch8
-  imu.csv       sample_index, device_time, host_time, acc_x..gyro_z
-  contact.csv   host_time, imp1..imp8 (Ohm), written when values change (~1 Hz)
-  markers.csv   host_time, emg_sample_index, label
+  emg.csv       segment, sample_index, device_time, host_time, host_mono, lost,
+                valid_mask, ch1..ch8   (invalid values are empty cells, never 0)
+  imu.csv       segment, sample_index, device_time, host_time, host_mono, valid_mask,
+                acc_x..gyro_z
+  contact.csv   host_time, segment, imp1..imp8 (Ohm, empty = unknown), on change (~1 Hz)
+  markers.csv   host_time, host_mono, segment, emg_sample_index, label
+
+device_time is the SDK timestamp (sample_index / nominal rate), not a sensor clock.
+host_time is wall-clock (time.time) for alignment; host_mono is time.monotonic for
+durations. Only received samples are written; index gaps stay visible as jumps.
 """
 
 import csv
+import io
 import json
 import queue
 import re
@@ -38,6 +45,35 @@ from .config import EMG_CHANNELS
 from .hub import DataHub, EmgBlock, ImuBlock
 
 RECORDING, FINALIZING, SAVED, ERROR = "recording", "finalizing", "saved", "error"
+
+_CH = [f"ch{i + 1}" for i in range(EMG_CHANNELS)]
+HEADERS = {
+    "emg": ["segment", "sample_index", "device_time", "host_time", "host_mono",
+            "lost", "valid_mask"] + _CH,
+    "imu": ["segment", "sample_index", "device_time", "host_time", "host_mono", "valid_mask",
+            "acc_x", "acc_y", "acc_z", "gyro_x", "gyro_y", "gyro_z"],
+    "contact": ["host_time", "segment"] + [f"imp{i + 1}" for i in range(EMG_CHANNELS)],
+    "markers": ["host_time", "host_mono", "segment", "emg_sample_index", "label"],
+}
+# Times: microseconds. Values: 9 significant digits = exact float32 round trip.
+_TIME = ["%.6f", "%.6f", "%.6f"]
+EMG_FMT = ["%d", "%d"] + _TIME + ["%d", "%d"] + ["%.9g"] * EMG_CHANNELS
+IMU_FMT = ["%d", "%d"] + _TIME + ["%d"] + ["%.9g"] * 6
+CONTACT_FMT = ["%.6f", "%d"] + ["%.9g"] * EMG_CHANNELS
+_NAN_CELL = re.compile(r"(?<=,)[-+]?nan(?=,|$)", re.MULTILINE)
+
+
+def _format_rows(rows: np.ndarray, fmt) -> str:
+    """CSV text for numeric rows; NaN (invalid / missing) becomes an empty cell."""
+    buf = io.StringIO()
+    np.savetxt(buf, rows, fmt=fmt, delimiter=",")
+    return _NAN_CELL.sub("", buf.getvalue())
+
+
+def _valid_mask(valid: np.ndarray) -> np.ndarray:
+    """Per-sample bitmask of valid channels (bit c = channel c+1 valid)."""
+    weights = (1 << np.arange(valid.shape[0], dtype=np.int64))[:, None]
+    return (valid.astype(np.int64) * weights).sum(axis=0)
 STREAMS = ("emg", "imu", "markers")
 DEFAULT_QUEUE_SIZE = 4096          # blocks; ~1 min of EMG at 16 samples/packet
 
@@ -58,6 +94,7 @@ class RecordingSession:
         self._stop = threading.Event()
         self._done = threading.Event()
         self._last_emg_index: Optional[int] = None
+        self._last_segment: Optional[int] = None
         self._t0 = time.monotonic()
         self._t_end: Optional[float] = None
         self._meta = {
@@ -109,7 +146,8 @@ class RecordingSession:
             if not self._accepting:
                 self.counts["markers"]["rejected"] += 1
                 return
-            self._put("markers", ("marker", t, mono, self._last_emg_index, label), 1)
+            self._put("markers", ("marker", t, mono, self._last_emg_index,
+                                  self._last_segment, label), 1)
 
     # -- data callbacks (source thread): only enqueue -----------------------------
     def _on_emg(self, block: EmgBlock):
@@ -119,6 +157,7 @@ class RecordingSession:
                 self.counts["emg"]["rejected"] += n
                 return
             self._last_emg_index = int(block.sample_index[-1])
+            self._last_segment = block.segment
             self._put("emg", ("emg", block), n)
 
     def _on_imu(self, block: ImuBlock):
@@ -154,36 +193,37 @@ class RecordingSession:
     # -- writer thread -------------------------------------------------------------
     def _write_emg(self, f, block: EmgBlock):
         n = block.data.shape[1]
-        rows = np.column_stack((block.sample_index, block.device_time,
-                                np.full(n, block.host_time), block.lost.astype(int), block.data.T))
-        np.savetxt(f, rows, fmt=["%d", "%.6f", "%.6f", "%d"] + ["%.6g"] * EMG_CHANNELS,
-                   delimiter=",")
+        rows = np.column_stack((np.full(n, block.segment), block.sample_index, block.device_time,
+                                np.full(n, block.host_time), np.full(n, block.host_mono),
+                                block.lost.astype(int), _valid_mask(block.valid), block.data.T))
+        f.write(_format_rows(rows, EMG_FMT))
 
     def _write_contact(self, f, block: EmgBlock):
         imp = block.impedance
-        if imp is None or (self._last_imp is not None and np.array_equal(imp, self._last_imp)):
+        if imp is None or (self._last_imp is not None
+                           and np.array_equal(imp, self._last_imp, equal_nan=True)):
             return
-        self._last_imp = imp.copy()
-        f.write(f"{block.host_time:.6f}," + ",".join(f"{v:.0f}" for v in imp) + "\n")
+        self._last_imp = np.array(imp, dtype=float)
+        row = np.concatenate(([block.host_time, block.segment], self._last_imp))[None, :]
+        f.write(_format_rows(row, CONTACT_FMT))
 
     def _write_imu(self, f, block: ImuBlock):
         n = block.data.shape[1]
-        rows = np.column_stack((block.sample_index, block.device_time,
-                                np.full(n, block.host_time), block.data.T))
-        np.savetxt(f, rows, fmt=["%d", "%.6f", "%.6f"] + ["%.6g"] * 6, delimiter=",")
+        rows = np.column_stack((np.full(n, block.segment), block.sample_index, block.device_time,
+                                np.full(n, block.host_time), np.full(n, block.host_mono),
+                                _valid_mask(block.valid), block.data.T))
+        f.write(_format_rows(rows, IMU_FMT))
 
     def _write_marker(self, w, item):
-        _, t, mono, idx, label = item
-        w.writerow([f"{t:.6f}", "" if idx is None else idx, label])
+        _, t, mono, idx, segment, label = item
+        w.writerow([f"{t:.6f}", f"{mono:.6f}", "" if segment is None else segment,
+                    "" if idx is None else idx, label])
 
     def _open_files(self):
-        chans = [f"ch{i + 1}" for i in range(EMG_CHANNELS)]
         files = {k: open(self.folder / f"{k}.csv", "w", newline="")
                  for k in ("emg", "imu", "contact", "markers")}
-        files["emg"].write(",".join(["sample_index", "device_time", "host_time", "lost"] + chans) + "\n")
-        files["imu"].write("sample_index,device_time,host_time,acc_x,acc_y,acc_z,gyro_x,gyro_y,gyro_z\n")
-        files["contact"].write(",".join(["host_time"] + [f"imp{i + 1}" for i in range(EMG_CHANNELS)]) + "\n")
-        files["markers"].write("host_time,emg_sample_index,label\n")
+        for k, header in HEADERS.items():
+            files[k].write(",".join(header) + "\n")
         return files
 
     def _write_item(self, files, marker_writer, item):

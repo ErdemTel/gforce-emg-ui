@@ -7,6 +7,8 @@ All Qt signals may be emitted from worker threads; Qt queues them to the UI thre
 import threading
 import time
 import traceback
+from dataclasses import dataclass
+from typing import Optional
 
 import numpy as np
 from PyQt5 import QtCore
@@ -29,6 +31,17 @@ class Source(QtCore.QObject):
         super().__init__()
         self.hub = hub
         self.target_emg_rate = emg_rate
+        self.settings_locked = False
+
+    def lock_settings(self, locked: bool):
+        """While locked (recording), firmware filters and sample rate cannot change."""
+        self.settings_locked = bool(locked)
+
+    def _check_unlocked(self, what: str) -> bool:
+        if self.settings_locked:
+            self.error.emit(f"{what} is locked while recording")
+            return False
+        return True
 
     @property
     def is_connected(self) -> bool:
@@ -41,8 +54,8 @@ class Source(QtCore.QObject):
     def stop_scan(self): ...
     def connect_device(self, address: str): ...
     def disconnect_device(self): ...
-    def set_emg_rate(self, rate: int): ...
-    def set_filter(self, key: str, on: bool): ...
+    def set_emg_rate(self, rate: int) -> bool: ...
+    def set_filter(self, key: str, on: bool) -> bool: ...
     def shutdown(self): ...
 
 
@@ -63,6 +76,7 @@ class SdkSource(Source):
         self._devices = {}
         self._sensor = None
         self._unhandled_types = set()
+        self._stream_id = 0
 
     @property
     def is_connected(self) -> bool:
@@ -131,6 +145,7 @@ class SdkSource(Source):
             self._ensure_notifications(sensor, ("NTF_EMG", "NTF_IMU"))
 
             self.hub.reset()
+            self._stream_id += 1
             if not sensor.isDataTransfering and not sensor.startDataNotification():
                 self.error.emit("Failed to start data stream")
                 return
@@ -209,11 +224,13 @@ class SdkSource(Source):
                 self._sensor = None
             self.disconnected.emit()
 
-    def set_emg_rate(self, rate: int):
+    def set_emg_rate(self, rate: int) -> bool:
+        if not self._check_unlocked("EMG sample rate"):
+            return False
         self.target_emg_rate = rate
         sensor = self._sensor
         if sensor is None:
-            return
+            return True
 
         def work():
             res = sensor.setParam("EMG_SAMPLE_RATE", str(rate))
@@ -221,11 +238,14 @@ class SdkSource(Source):
                 self.error.emit(f"EMG_SAMPLE_RATE={rate}: {res}")
             self._read_params(sensor)
         self._sdk.submit(work)
+        return True
 
-    def set_filter(self, key: str, on: bool):
+    def set_filter(self, key: str, on: bool) -> bool:
+        if not self._check_unlocked("Firmware filter"):
+            return False
         sensor = self._sensor
         if sensor is None:
-            return
+            return False
 
         def work():
             res = sensor.setParam(key, "ON" if on else "OFF")
@@ -233,12 +253,13 @@ class SdkSource(Source):
                 self.error.emit(f"{key}: {res}")
             self._read_params(sensor)
         self._sdk.submit(work)
+        return True
 
     # -- data (SDK callback thread) -------------------------------------------
     def _on_data(self, sensor, data_list):
         # Sample buffers are borrowed from native memory that the SDK reuses:
         # copy everything we need before returning.
-        host_time = time.time()
+        host_time, host_mono = time.time(), time.monotonic()
         DT = self._DataType
         for data in data_list:
             try:
@@ -246,9 +267,9 @@ class SdkSource(Source):
                     continue
                 dt = data.dataType
                 if dt == DT.NTF_EMG:
-                    self.hub.push_emg(self._emg_block(data, host_time))
+                    self.hub.push_emg(self._emg_block(data, host_time, host_mono, self._stream_id))
                 elif dt == DT.NTF_IMU:
-                    self.hub.push_imu(self._imu_block(data, host_time))
+                    self.hub.push_imu(self._imu_block(data, host_time, host_mono, self._stream_id))
                 elif dt not in self._unhandled_types:
                     self._unhandled_types.add(dt)
                     print(f"[SdkSource] ignoring data type {dt!r}")
@@ -256,42 +277,51 @@ class SdkSource(Source):
                 traceback.print_exc()
 
     @staticmethod
-    def _emg_block(data, host_time) -> EmgBlock:
-        arr = data.as_numpy()
+    def _convert(arr, channels):
+        """(values, valid, lost) with missing channels and lost samples as NaN / invalid."""
         ch, n = arr.shape
-        values = np.zeros((EMG_CHANNELS, n), dtype=np.float32)
+        k = min(ch, channels)
+        lost = arr["isLost"][0] != 0
+        values = np.full((channels, n), np.nan, dtype=np.float32)
+        valid = np.zeros((channels, n), dtype=bool)
+        valid[:k] = arr["isLost"][:k] == 0
+        values[:k] = np.where(valid[:k], arr["data"][:k], np.nan)
+        return values, valid, lost
+
+    @classmethod
+    def _emg_block(cls, data, host_time, host_mono, stream_id) -> EmgBlock:
+        arr = data.as_numpy()
+        values, valid, lost = cls._convert(arr, EMG_CHANNELS)
+        k = min(arr.shape[0], EMG_CHANNELS)
         imp = np.full(EMG_CHANNELS, np.nan)
-        k = min(ch, EMG_CHANNELS)
-        values[:k] = arr["data"][:k]
         imp[:k] = arr["impedance"][:k, -1]
         return EmgBlock(
             data=values,
+            valid=valid,
             sample_index=arr["sampleIndex"][0].astype(np.int64),
             device_time=arr["absTimeStampInSec"][0].copy(),
-            lost=arr["isLost"][0] != 0,
+            lost=lost,
             host_time=host_time,
-            host_mono=time.monotonic(),
+            host_mono=host_mono,
             sample_rate=float(data.sampleRate),
             impedance=imp,
-            valid=np.ones_like(values, bool),
             lost_packages=int(data.lostPackageCount),
+            stream_id=stream_id,
         )
 
-    @staticmethod
-    def _imu_block(data, host_time) -> ImuBlock:
+    @classmethod
+    def _imu_block(cls, data, host_time, host_mono, stream_id) -> ImuBlock:
         arr = data.as_numpy()
-        ch, n = arr.shape
-        values = np.zeros((IMU_CHANNELS, n), dtype=np.float32)
-        k = min(ch, IMU_CHANNELS)
-        values[:k] = arr["data"][:k]
+        values, valid, _ = cls._convert(arr, IMU_CHANNELS)
         return ImuBlock(
             data=values,
+            valid=valid,
             sample_index=arr["sampleIndex"][0].astype(np.int64),
             device_time=arr["absTimeStampInSec"][0].copy(),
             host_time=host_time,
-            host_mono=time.monotonic(),
+            host_mono=host_mono,
             sample_rate=float(data.sampleRate),
-            valid=np.ones_like(values, bool),
+            stream_id=stream_id,
         )
 
     def shutdown(self):
@@ -306,28 +336,127 @@ class SdkSource(Source):
 # Simulator
 # ---------------------------------------------------------------------------
 
-class SimSource(Source):
-    """Synthetic 8-ch EMG + 6-axis IMU + contact impedance, paced in real time.
+@dataclass
+class SimFaults:
+    """Reproducible fault injection for the simulator (same seed -> same faults)."""
+    lost_prob: float = 0.0              # per-sample probability of an SDK-style lost sample
+    missing_channels: tuple = ()        # EMG channels never delivered
+    index_jump_every: int = 0           # every N EMG blocks, skip `index_jump` sample indices
+    index_jump: int = 0
+    fail_connects: int = 0              # number of connect attempts that fail
 
-    Cycles through 'gestures' that each activate a different channel pattern,
-    so the dashboards show which channel fires most.
+
+class SimGenerator:
+    """Deterministic synthetic 8-ch EMG + 6-axis IMU + impedance, block by block.
+
+    Cycles through 'gestures' that each activate a different channel pattern.
     """
 
-    ADDRESS = "SIM:00:00:00:00:00"
     IMU_RATE = 50
 
+    def __init__(self, seed=None, rate: int = DEFAULT_EMG_RATE,
+                 package: int = PACKAGE_SAMPLE_COUNT, faults: Optional[SimFaults] = None,
+                 filters: Optional[dict] = None):
+        self.rng = np.random.default_rng(seed)
+        self.rate = rate
+        self.package = package
+        self.faults = faults or SimFaults()
+        self.filters = filters if filters is not None else {k: False for k in FILTERS}
+        fixed = np.random.default_rng(7)
+        self._gestures = fixed.uniform(0.0, 1.0, (6, EMG_CHANNELS)) ** 3
+        self._offsets = fixed.uniform(-150, 150, EMG_CHANNELS)
+        self._base_imp = np.array([180, 220, 260, 300, 350, 700, 240, 1400], float) * 1000
+        self.stream_id = 1
+        self.restart()
+
+    def restart(self, stream_id: Optional[int] = None):
+        """Start a new stream: like the band after a reconnect, indices restart at 0."""
+        if stream_id is not None:
+            self.stream_id = stream_id
+        self.emg_idx = 0
+        self.imu_idx = 0
+        self._imu_carry = 0.0
+        self._blocks = 0
+        self._imp = self._base_imp.copy()
+        self._pending_imu: Optional[ImuBlock] = None
+
+    def next_emg(self, host_time: Optional[float] = None,
+                 host_mono: Optional[float] = None) -> EmgBlock:
+        host_time = time.time() if host_time is None else host_time
+        host_mono = time.monotonic() if host_mono is None else host_mono
+        rate, n, f = self.rate, self.package, self.faults
+        idx = np.arange(self.emg_idx, self.emg_idx + n, dtype=np.int64)
+        ts = idx / rate
+        phase = ts % 4.0                                   # 2.5 s contraction, 1.5 s rest
+        g = int(ts[0] // 4.0) % len(self._gestures)
+        act = np.clip(np.sin(np.pi * np.clip(phase, 0, 2.5) / 2.5), 0, None) * (phase < 2.5)
+        envelope = 8.0 + 220.0 * self._gestures[g][:, None] * act[None, :]
+        emg = self.rng.standard_normal((EMG_CHANNELS, n)) * envelope
+        if not self.filters.get("FILTER_HPF"):
+            emg += self._offsets[:, None]
+        if not self.filters.get("FILTER_50HZ"):
+            emg += 15.0 * np.sin(2 * np.pi * 50.0 * ts)[None, :]
+        if self.emg_idx % rate < n:                       # impedance updates ~1 Hz
+            self._imp = self._base_imp * self.rng.uniform(0.95, 1.05, EMG_CHANNELS)
+        lost = self.rng.random(n) < f.lost_prob
+        valid = np.ones((EMG_CHANNELS, n), bool)
+        valid[:, lost] = False
+        imp = self._imp.copy()
+        for c in f.missing_channels:
+            valid[c] = False
+            imp[c] = np.nan
+        block = EmgBlock(
+            data=np.where(valid, emg, np.nan).astype(np.float32),
+            valid=valid, sample_index=idx, device_time=ts, lost=lost,
+            host_time=host_time, host_mono=host_mono, sample_rate=float(rate),
+            impedance=imp, lost_packages=int(lost.any()), stream_id=self.stream_id)
+        self.emg_idx += n
+        self._blocks += 1
+        if f.index_jump_every and self._blocks % f.index_jump_every == 0:
+            self.emg_idx += f.index_jump
+        self._make_imu(n, host_time, host_mono)
+        return block
+
+    def _make_imu(self, n_emg, host_time, host_mono):
+        self._imu_carry += n_emg * self.IMU_RATE / self.rate
+        m = int(self._imu_carry)
+        if not m:
+            self._pending_imu = None
+            return
+        self._imu_carry -= m
+        ti = (self.imu_idx + np.arange(m)) / self.IMU_RATE
+        acc = np.vstack([0.3 * np.sin(0.5 * ti), 0.3 * np.cos(0.5 * ti),
+                         np.full(m, 0.95)]) + self.rng.normal(0, 0.01, (3, m))
+        gyro = np.vstack([20 * np.cos(0.5 * ti), -20 * np.sin(0.5 * ti),
+                          5 * np.sin(0.2 * ti)]) + self.rng.normal(0, 0.5, (3, m))
+        self._pending_imu = ImuBlock(
+            data=np.vstack([acc, gyro]).astype(np.float32), valid=np.ones((6, m), bool),
+            sample_index=np.arange(self.imu_idx, self.imu_idx + m, dtype=np.int64),
+            device_time=ti, host_time=host_time, host_mono=host_mono,
+            sample_rate=float(self.IMU_RATE), stream_id=self.stream_id)
+        self.imu_idx += m
+
+    def take_imu(self) -> Optional[ImuBlock]:
+        b, self._pending_imu = self._pending_imu, None
+        return b
+
+
+class SimSource(Source):
+    """Simulator with the Source interface, paced in real time on a thread."""
+
+    ADDRESS = "SIM:00:00:00:00:00"
+
     def __init__(self, hub: DataHub, emg_rate: int = DEFAULT_EMG_RATE,
-                 package_samples: int = PACKAGE_SAMPLE_COUNT, seed=None):
+                 package_samples: int = PACKAGE_SAMPLE_COUNT, seed=None,
+                 faults: Optional[SimFaults] = None):
         super().__init__(hub, emg_rate)
         self._package = package_samples
         self._seed = seed
+        self.faults = faults or SimFaults()
         self._thread = None
         self._stop = threading.Event()
         self._filters = {k: False for k in FILTERS}
-        rng = np.random.default_rng(7)
-        self._gestures = rng.uniform(0.0, 1.0, (6, EMG_CHANNELS)) ** 3
-        self._offsets = rng.uniform(-150, 150, EMG_CHANNELS)
-        self._base_imp = np.array([180, 220, 260, 300, 350, 700, 240, 1400], float) * 1000
+        self._gen: Optional[SimGenerator] = None
 
     @property
     def is_connected(self) -> bool:
@@ -348,6 +477,8 @@ class SimSource(Source):
         if self.is_connected:
             return
         self.hub.reset()
+        self._gen = SimGenerator(self._seed, self.target_emg_rate, self._package,
+                                 self.faults, self._filters)
         self._stop.clear()
         self._thread = threading.Thread(target=self._run, name="sim-source", daemon=True)
         self._thread.start()
@@ -366,13 +497,21 @@ class SimSource(Source):
         self._thread = None
         self.disconnected.emit()
 
-    def set_emg_rate(self, rate: int):
+    def set_emg_rate(self, rate: int) -> bool:
+        if not self._check_unlocked("EMG sample rate"):
+            return False
         self.target_emg_rate = rate
+        if self._gen is not None:
+            self._gen.rate = rate
         self._emit_params()
+        return True
 
-    def set_filter(self, key: str, on: bool):
+    def set_filter(self, key: str, on: bool) -> bool:
+        if not self._check_unlocked("Firmware filter"):
+            return False
         self._filters[key] = on
         self._emit_params()
+        return True
 
     def _emit_params(self):
         self.params.emit({"emg_rate": self.target_emg_rate, "filters": dict(self._filters)})
@@ -381,63 +520,17 @@ class SimSource(Source):
         self._stop.set()
 
     def _run(self):
-        rng = np.random.default_rng(self._seed)
-        emg_idx = 0
-        imu_idx = 0
-        t0 = time.time()
-        next_t = t0
-        imu_carry = 0.0
-        imp = self._base_imp.copy()
+        gen = self._gen
+        next_t = time.monotonic()
         while not self._stop.is_set():
-            rate = self.target_emg_rate
-            n = self._package
-            t = emg_idx / rate
-            ts = t + np.arange(n) / rate
-            # Gesture schedule: 2.5 s contraction, 1.5 s rest
-            phase = ts % 4.0
-            g = int(t // 4.0) % len(self._gestures)
-            act = np.clip(np.sin(np.pi * np.clip(phase, 0, 2.5) / 2.5), 0, None) * (phase < 2.5)
-            envelope = 8.0 + 220.0 * self._gestures[g][:, None] * act[None, :]
-            emg = rng.standard_normal((EMG_CHANNELS, n)) * envelope
-            if not self._filters["FILTER_HPF"]:
-                emg += self._offsets[:, None]
-            if not self._filters["FILTER_50HZ"]:
-                emg += 15.0 * np.sin(2 * np.pi * 50.0 * ts)[None, :]
-            if emg_idx % rate < n:          # contact impedance updates ~1 Hz on the band
-                imp = self._base_imp * rng.uniform(0.95, 1.05, EMG_CHANNELS)
-            now = time.time()
-            self.hub.push_emg(EmgBlock(
-                data=emg.astype(np.float32),
-                sample_index=np.arange(emg_idx, emg_idx + n, dtype=np.int64),
-                device_time=t0 + ts,
-                lost=np.zeros(n, bool),
-                host_time=now,
-                host_mono=time.monotonic(),
-                sample_rate=float(rate),
-                impedance=imp,
-                valid=np.ones((EMG_CHANNELS, n), bool),
-            ))
-            emg_idx += n
-
-            imu_carry += n * self.IMU_RATE / rate
-            m = int(imu_carry)
-            if m:
-                imu_carry -= m
-                ti = (imu_idx + np.arange(m)) / self.IMU_RATE
-                acc = np.vstack([0.3 * np.sin(0.5 * ti), 0.3 * np.cos(0.5 * ti),
-                                 np.full(m, 0.95)]) + rng.normal(0, 0.01, (3, m))
-                gyro = np.vstack([20 * np.cos(0.5 * ti), -20 * np.sin(0.5 * ti),
-                                  5 * np.sin(0.2 * ti)]) + rng.normal(0, 0.5, (3, m))
-                self.hub.push_imu(ImuBlock(
-                    data=np.vstack([acc, gyro]).astype(np.float32),
-                    sample_index=np.arange(imu_idx, imu_idx + m, dtype=np.int64),
-                    device_time=t0 + ti, host_time=now, host_mono=time.monotonic(),
-                    sample_rate=float(self.IMU_RATE), valid=np.ones((6, m), bool)))
-                imu_idx += m
-
-            next_t += n / rate
-            delay = next_t - time.time()
+            block = gen.next_emg()
+            self.hub.push_emg(block)
+            imu = gen.take_imu()
+            if imu is not None:
+                self.hub.push_imu(imu)
+            next_t += block.data.shape[1] / block.sample_rate
+            delay = next_t - time.monotonic()
             if delay > 0:
                 self._stop.wait(delay)
             elif delay < -1.0:      # fell far behind (e.g. machine suspended)
-                next_t = time.time()
+                next_t = time.monotonic()

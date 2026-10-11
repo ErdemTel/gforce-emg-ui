@@ -41,5 +41,5 @@ class ImuDashboard(QtWidgets.QWidget):
             return
         x = (np.arange(data.shape[1]) - (data.shape[1] - 1)) / rate
         for i, curve in enumerate(self.curves):
-            curve.setData(x, data[i])
+            curve.setData(x, data[i], connect="finite")
         self.plots[0].setXRange(-WINDOW_S, 0, padding=0)

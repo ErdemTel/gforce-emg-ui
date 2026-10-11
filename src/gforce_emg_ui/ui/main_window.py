@@ -215,8 +215,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_record.setEnabled((connected or self.recorder.active) and not finalizing)
         self.btn_record.setText("■ Stop recording" if self.recorder.active else "● Start recording")
         self.btn_marker.setEnabled(self.recorder.active)
+        # Firmware filters and sample rate are locked while a recording is open
+        locked = self.recorder.busy
+        if self.source.settings_locked != locked:
+            self.source.lock_settings(locked)
         for rb in self.rate_buttons.values():
-            rb.setEnabled(not self.recorder.busy)
+            rb.setEnabled(not locked)
+        available = self.current_params.get("filters", {})
+        for key, cb in self.filter_checks.items():
+            cb.setEnabled(key in available and not locked)
 
     # -- device -----------------------------------------------------------------
     def _scan(self):
@@ -284,14 +291,15 @@ class MainWindow(QtWidgets.QMainWindow):
         for key, cb in self.filter_checks.items():
             with QtCore.QSignalBlocker(cb):
                 cb.setChecked(bool(params.get("filters", {}).get(key, False)))
-                cb.setEnabled(key in params.get("filters", {}))
+        self._update_buttons()
 
     def _on_rate_toggled(self, rate: int, checked: bool):
-        if checked:
-            self.source.set_emg_rate(rate)
+        if checked and not self.source.set_emg_rate(rate):
+            self._on_params(self.current_params)          # revert the radio button
 
     def _on_filter_toggled(self, key: str, on: bool):
-        self.source.set_filter(key, on)
+        if not self.source.set_filter(key, on):
+            self._on_params(self.current_params)          # revert the checkbox
 
     def _on_error(self, msg: str):
         self._set_status(f"⚠ {msg}")
@@ -378,6 +386,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.equal.update_contact(imp)
         self.detail.update_contact(imp)
         self._update_record_label()
+        if self.source.settings_locked != self.recorder.busy:
+            self._update_buttons()          # e.g. session ended by a writer error
         if self._finalizing_seen and not self.recorder.busy:
             self._finalizing_seen = False
             self._update_buttons()
