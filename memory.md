@@ -97,8 +97,20 @@ control, **fingertip force estimation**, **compliance estimation** (muscle co-co
 - Bug found by the tests: hub unsubscribe used `is` on bound methods → closed sessions stayed subscribed.
 - Benchmark (simulator, host only, this machine): push_emg p50 6 µs / p99 15 µs / max 5.7 ms; recorder
   80k samples reconciled, stop call 0.01 ms; refresh+paint p50 9.8 / 3.6 / 2.3 ms (equal/detail/IMU).
-- NOT yet verified on the physical band: reconnection path, end-to-end latency, loss behaviour.
-- Next: test the hardening branch with the band, then merge into main.
+- Hardware check of `hardening` with band BC:93:2A:3F:80:E4 (FW V1.0.4, dongle backend), 60 s + reconnect:
+  * connect 7.0 s to first data; EMG 503–509 Hz delivered (nominal 1000) in 16-sample batches arriving in
+    ~150 ms bursts (callback gap p95 150.5 ms) — unchanged from the earlier test; IMU ~100 of 200 Hz.
+  * 0 lost samples, 0 index gaps, 0 in-block anomalies; CSV audit: 35,152 rows, indices strictly
+    increasing per segment, counts reconciled, session SAVED.
+  * forced link drop (sensor.disconnect() behind the source's back) during recording -> reconnecting ->
+    streaming in 8.9 s, new segment 2 (indices restart at 0), recording continued and saved.
+  * user disconnect -> idle; connect to a non-existent address -> failed with sensor cleared.
+  * host work on the SDK callback thread (hub.push_emg incl. recorder): p50 14 µs, p99 52 µs, max 227 µs.
+  * full UI with the band: settings locked while recording, closing the window mid-recording finalized
+    (9,152/9,152 samples) before closing.
+  * found + fixed: queued state signals can arrive out of order -> UI now reads source.state (commit after docs).
+  * NOT measured: sensor→host latency (no external reference); a real radio link loss (out of range/power off).
+- Next: merge `hardening` into main; ask OYMotion about 500 Hz effective rate / 150 ms bursts on FW V1.0.4.
 
 ## Remote workflow
 
