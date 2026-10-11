@@ -18,7 +18,18 @@ from .config import (DEFAULT_EMG_RATE, EMG_CHANNELS, FILTERS, IMU_CHANNELS,
 from .hub import DataHub, EmgBlock, ImuBlock
 
 
+# Connection states (Source.state, emitted via state_changed)
+IDLE = "idle"
+SCANNING = "scanning"
+CONNECTING = "connecting"
+STREAMING = "streaming"
+RECONNECTING = "reconnecting"     # link lost unexpectedly; retrying automatically
+DISCONNECTING = "disconnecting"
+FAILED = "failed"                 # connect or all reconnect attempts failed; cleaned up
+
+
 class Source(QtCore.QObject):
+    state_changed = QtCore.pyqtSignal(str)
     devices_found = QtCore.pyqtSignal(list)    # [(name, address, rssi), ...]
     status = QtCore.pyqtSignal(str)
     connected = QtCore.pyqtSignal(dict)        # device summary
@@ -32,6 +43,15 @@ class Source(QtCore.QObject):
         self.hub = hub
         self.target_emg_rate = emg_rate
         self.settings_locked = False
+        self.state = IDLE
+        self._state_lock = threading.Lock()
+
+    def _set_state(self, state: str):
+        with self._state_lock:
+            if state == self.state:
+                return
+            self.state = state
+        self.state_changed.emit(state)
 
     def lock_settings(self, locked: bool):
         """While locked (recording), firmware filters and sample rate cannot change."""
@@ -45,7 +65,7 @@ class Source(QtCore.QObject):
 
     @property
     def is_connected(self) -> bool:
-        raise NotImplementedError
+        return self.state == STREAMING
 
     def backend_name(self) -> str:
         return ""
@@ -64,24 +84,33 @@ class Source(QtCore.QObject):
 # ---------------------------------------------------------------------------
 
 class SdkSource(Source):
+    """The real band. Blocking SDK calls run on the SDK runner thread (sdk.submit).
+
+    Connection lifecycle: IDLE/FAILED -> CONNECTING -> STREAMING. A failed connect
+    stops/disconnects whatever was opened and ends in FAILED. An unexpected link
+    loss while STREAMING goes to RECONNECTING and retries with `reconnect_delays`
+    (each success starts a new stream_id, i.e. a new data segment); if all
+    attempts fail the state is FAILED. A user disconnect ends in IDLE.
+    """
+
     def __init__(self, hub: DataHub, emg_rate: int = DEFAULT_EMG_RATE,
-                 package_samples: int = PACKAGE_SAMPLE_COUNT):
+                 package_samples: int = PACKAGE_SAMPLE_COUNT, sdk=None,
+                 reconnect_delays=(1.0, 2.0, 4.0, 8.0)):
         super().__init__(hub, emg_rate)
-        import sensor
-        self._sdk = sensor
-        self._DataType = sensor.DataType
+        if sdk is None:
+            import sensor as sdk
+        self._sdk = sdk
+        self._DataType = sdk.DataType
         self._package_samples = package_samples
-        self._ctrl = sensor.SensorController()
+        self.reconnect_delays = tuple(reconnect_delays)
+        self._ctrl = sdk.SensorController()
         self._ctrl.on_sensor_scan_result = self._on_scan
         self._devices = {}
         self._sensor = None
+        self._address = None
+        self._user_disconnect = False
         self._unhandled_types = set()
         self._stream_id = 0
-
-    @property
-    def is_connected(self) -> bool:
-        s = self._sensor
-        return s is not None and s.isReady
 
     def backend_name(self) -> str:
         try:
@@ -94,13 +123,18 @@ class SdkSource(Source):
         if not self._ctrl.isEnable:
             self.error.emit("Bluetooth is disabled (no adapter or dongle usable)")
             return
+        if self.state not in (IDLE, FAILED, SCANNING):
+            return
         if not self._ctrl.isScanning:
             self._ctrl.startScan(SCAN_PERIOD_MS)
+        self._set_state(SCANNING)
         self.status.emit("Scanning...")
 
     def stop_scan(self):
         if self._ctrl.isScanning:
             self._ctrl.stopScan()
+        if self.state == SCANNING:
+            self._set_state(IDLE)
 
     def _on_scan(self, device_list):
         for d in device_list:
@@ -109,33 +143,36 @@ class SdkSource(Source):
 
     # -- connection -----------------------------------------------------------
     def connect_device(self, address: str):
+        if self.state in (CONNECTING, STREAMING, RECONNECTING, DISCONNECTING):
+            return
+        self._address = address
+        self._user_disconnect = False
+        self._set_state(CONNECTING)
         self._sdk.submit(self._connect_worker, address)
 
-    def _connect_worker(self, address: str):
+    def _connect_worker(self, address: str, reconnect: bool = False) -> bool:
+        """Runs on the SDK runner thread. Returns True when streaming."""
+        sensor = None
         try:
             device = self._devices.get(address)
             if device is None:
-                self.error.emit(f"Unknown device {address}; scan first")
-                return
-            self.stop_scan()
+                raise RuntimeError(f"unknown device {address}; scan first")
+            if self._ctrl.isScanning:
+                self._ctrl.stopScan()
             sensor = self._ctrl.requireSensor(device)
             if sensor is None:
-                self.error.emit("Failed to create sensor profile")
-                return
+                raise RuntimeError("failed to create sensor profile")
             sensor.on_sensor_notify_data = self._on_data
             sensor.on_state_change = self._on_state
             sensor.on_power_changed = lambda s, p: p >= 0 and self.battery.emit(int(p))
             sensor.on_error_callback = lambda s, msg: self.error.emit(f"SDK: {msg}")
             sensor.on_device_info_update = lambda s, info: self._emit_params(s)
 
-            self.status.emit(f"Connecting to {device.Name}...")
+            self.status.emit(f"{'Reconnecting' if reconnect else 'Connecting'} to {device.Name}...")
             if not sensor.isReady and not sensor.connect():
-                self.error.emit(f"Failed to connect to {device.Name}")
-                return
+                raise RuntimeError(f"failed to connect to {device.Name}")
             if not sensor.hasInited and not sensor.init(self._package_samples, POWER_REFRESH_MS):
-                self.error.emit(f"Failed to initialize {device.Name}")
-                return
-            self._sensor = sensor
+                raise RuntimeError(f"failed to initialize {device.Name}")
 
             rate = sensor.getParam("EMG_SAMPLE_RATE")
             if str(rate) != str(self.target_emg_rate):
@@ -144,14 +181,18 @@ class SdkSource(Source):
                     self.error.emit(f"EMG_SAMPLE_RATE={self.target_emg_rate}: {res}")
             self._ensure_notifications(sensor, ("NTF_EMG", "NTF_IMU"))
 
-            self.hub.reset()
-            self._stream_id += 1
+            if not reconnect:
+                self.hub.reset()
+            self._stream_id += 1          # new stream -> new data segment
             if not sensor.isDataTransfering and not sensor.startDataNotification():
-                self.error.emit("Failed to start data stream")
-                return
+                raise RuntimeError("failed to start data stream")
+            if self._user_disconnect:     # user gave up while we were connecting
+                raise RuntimeError("cancelled")
 
+            self._sensor = sensor
+            self._set_state(STREAMING)
             info = sensor.getDeviceInfo()
-            summary = {
+            self.connected.emit({
                 "name": device.Name,
                 "address": device.Address,
                 "model": getattr(info, "ModelName", ""),
@@ -162,15 +203,48 @@ class SdkSource(Source):
                 "mtu": getattr(info, "MTUSize", 0),
                 "backend": self.backend_name(),
                 "package_samples": self._package_samples,
-            }
-            self.connected.emit(summary)
+            })
             self._emit_params(sensor)
             power = sensor.getBatteryLevel()
             if power >= 0:
                 self.battery.emit(int(power))
+            return True
         except Exception as e:
-            traceback.print_exc()
-            self.error.emit(f"Connect failed: {e}")
+            self.error.emit(f"{'Reconnect' if reconnect else 'Connect'} failed: {e}")
+        self._cleanup(sensor)
+        if not reconnect:
+            self._set_state(IDLE if self._user_disconnect else FAILED)
+        return False
+
+    def _cleanup(self, sensor):
+        """Undo a partial connection. The sensor is not self._sensor, so the
+        Disconnected callback this triggers is not treated as a link loss."""
+        if sensor is None:
+            return
+        try:
+            if sensor.isDataTransfering:
+                sensor.stopDataNotification()
+        except Exception as e:
+            self.error.emit(f"Cleanup: stop stream failed: {e}")
+        try:
+            if sensor.isReady:
+                sensor.disconnect()
+        except Exception as e:
+            self.error.emit(f"Cleanup: disconnect failed: {e}")
+        if sensor is self._sensor:
+            self._sensor = None
+
+    def _reconnect_loop(self, address: str):
+        for delay in self.reconnect_delays:
+            if self._user_disconnect:
+                return
+            time.sleep(delay)
+            if self._user_disconnect:
+                return
+            if self._connect_worker(address, reconnect=True):
+                return
+        self._set_state(FAILED)
+        self.disconnected.emit()
 
     def _ensure_notifications(self, sensor, keys):
         state = str(sensor.getParam("NTF"))
@@ -205,9 +279,15 @@ class SdkSource(Source):
             self.error.emit(f"Reading parameters failed: {e}")
 
     def disconnect_device(self):
-        sensor = self._sensor
-        if sensor is None:
+        if self.state in (IDLE, FAILED, DISCONNECTING):
             return
+        self._user_disconnect = True
+        sensor = self._sensor
+        if sensor is None:              # connecting / waiting to reconnect: just stop
+            self._set_state(IDLE)
+            self.disconnected.emit()
+            return
+        self._set_state(DISCONNECTING)
 
         def work():
             try:
@@ -216,13 +296,24 @@ class SdkSource(Source):
                 sensor.disconnect()
             except Exception as e:
                 self.error.emit(f"Disconnect failed: {e}")
+            if self.state == DISCONNECTING:    # no Disconnected callback arrived
+                self._sensor = None
+                self._set_state(IDLE)
+                self.disconnected.emit()
         self._sdk.submit(work)
 
     def _on_state(self, sensor, state):
-        if state == self._sdk.DeviceStateEx.Disconnected:
-            if sensor is self._sensor:
-                self._sensor = None
+        # SDK callback thread: no blocking SDK calls here
+        if state != self._sdk.DeviceStateEx.Disconnected or sensor is not self._sensor:
+            return
+        self._sensor = None
+        if self._user_disconnect:
+            self._set_state(IDLE)
             self.disconnected.emit()
+        elif self.state == STREAMING:
+            self._set_state(RECONNECTING)
+            self.status.emit("Link lost, reconnecting...")
+            self._sdk.submit(self._reconnect_loop, self._address)
 
     def set_emg_rate(self, rate: int) -> bool:
         if not self._check_unlocked("EMG sample rate"):
@@ -442,46 +533,64 @@ class SimGenerator:
 
 
 class SimSource(Source):
-    """Simulator with the Source interface, paced in real time on a thread."""
+    """Simulator with the Source interface and state machine, paced in real time.
+
+    Fault injection: SimFaults (lost samples, missing channels, index jumps,
+    failing connects) and inject_disconnect() for a link loss followed by an
+    automatic reconnect (new stream_id, indices restart at 0).
+    """
 
     ADDRESS = "SIM:00:00:00:00:00"
 
     def __init__(self, hub: DataHub, emg_rate: int = DEFAULT_EMG_RATE,
                  package_samples: int = PACKAGE_SAMPLE_COUNT, seed=None,
-                 faults: Optional[SimFaults] = None):
+                 faults: Optional[SimFaults] = None, reconnect_delay: float = 1.0):
         super().__init__(hub, emg_rate)
         self._package = package_samples
         self._seed = seed
         self.faults = faults or SimFaults()
+        self.reconnect_delay = reconnect_delay
         self._thread = None
         self._stop = threading.Event()
+        self._drop = threading.Event()
         self._filters = {k: False for k in FILTERS}
         self._gen: Optional[SimGenerator] = None
-
-    @property
-    def is_connected(self) -> bool:
-        return self._thread is not None and self._thread.is_alive()
+        self._stream_id = 0
 
     def backend_name(self) -> str:
         return "simulator"
 
     def start_scan(self):
+        if self.state not in (IDLE, FAILED, SCANNING):
+            return
+        self._set_state(SCANNING)
         self.status.emit("Scanning (simulator)...")
         QtCore.QTimer.singleShot(300, lambda: self.devices_found.emit(
             [("gForceUltra-SIM", self.ADDRESS, -42)]))
 
     def stop_scan(self):
-        pass
+        if self.state == SCANNING:
+            self._set_state(IDLE)
 
     def connect_device(self, address: str):
-        if self.is_connected:
+        if self.state in (CONNECTING, STREAMING, RECONNECTING, DISCONNECTING):
+            return
+        self._set_state(CONNECTING)
+        if self.faults.fail_connects > 0:
+            self.faults.fail_connects -= 1
+            self.error.emit("Connect failed: simulated failure")
+            self._set_state(FAILED)          # nothing was started: nothing to clean up
             return
         self.hub.reset()
+        self._stream_id += 1
         self._gen = SimGenerator(self._seed, self.target_emg_rate, self._package,
                                  self.faults, self._filters)
+        self._gen.stream_id = self._stream_id
         self._stop.clear()
+        self._drop.clear()
         self._thread = threading.Thread(target=self._run, name="sim-source", daemon=True)
         self._thread.start()
+        self._set_state(STREAMING)
         self.connected.emit({"name": "gForceUltra-SIM", "address": self.ADDRESS,
                              "model": "gForceUltra (simulated)", "firmware": "-",
                              "hardware": "-", "emg_channels": EMG_CHANNELS,
@@ -490,11 +599,20 @@ class SimSource(Source):
         self._emit_params()
         self.battery.emit(87)
 
+    def inject_disconnect(self):
+        """Simulate an unexpected link loss (the source reconnects by itself)."""
+        self._drop.set()
+
     def disconnect_device(self):
+        if self._thread is None:
+            if self.state != IDLE:
+                self._set_state(IDLE)
+            return
+        self._set_state(DISCONNECTING)
         self._stop.set()
-        if self._thread is not None:
-            self._thread.join(timeout=2)
+        self._thread.join(timeout=2)
         self._thread = None
+        self._set_state(IDLE)
         self.disconnected.emit()
 
     def set_emg_rate(self, rate: int) -> bool:
@@ -523,6 +641,16 @@ class SimSource(Source):
         gen = self._gen
         next_t = time.monotonic()
         while not self._stop.is_set():
+            if self._drop.is_set():
+                self._drop.clear()
+                self._set_state(RECONNECTING)
+                self.status.emit("Link lost, reconnecting...")
+                if self._stop.wait(self.reconnect_delay):
+                    return
+                self._stream_id += 1
+                gen.restart(stream_id=self._stream_id)
+                self._set_state(STREAMING)
+                next_t = time.monotonic()
             block = gen.next_emg()
             self.hub.push_emg(block)
             imu = gen.take_imu()

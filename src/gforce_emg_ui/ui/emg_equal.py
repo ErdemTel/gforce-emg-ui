@@ -19,6 +19,9 @@ class EqualScaleDashboard(QtWidgets.QWidget):
         self._yrange = 50.0
         self._rms_peak = 10.0
         self.last_rms = np.full(EMG_CHANNELS, np.nan)
+        self._view_version = 0
+        self._drawn_key = None
+        self.redraw_count = 0
 
         # -- toolbar --
         self.window_combo = QtWidgets.QComboBox()
@@ -40,6 +43,9 @@ class EqualScaleDashboard(QtWidgets.QWidget):
         self.range_spin.setPrefix("± ")
         self.range_spin.setEnabled(False)
         self.auto_check.toggled.connect(lambda on: self.range_spin.setEnabled(not on))
+        for sig in (self.window_combo.currentIndexChanged, self.rms_combo.currentIndexChanged,
+                    self.dc_check.toggled, self.auto_check.toggled, self.range_spin.valueChanged):
+            sig.connect(self.invalidate)
 
         bar = QtWidgets.QHBoxLayout()
         for w in (QtWidgets.QLabel("Window"), self.window_combo,
@@ -128,12 +134,22 @@ class EqualScaleDashboard(QtWidgets.QWidget):
     def update_contact(self, impedance):
         self._set_labels(impedance)
 
-    def refresh(self):
+    def invalidate(self, *_):
+        """A view setting changed: redraw on the next refresh even without new data."""
+        self._view_version += 1
+
+    def refresh(self) -> bool:
+        """Redraw if data or view settings changed. Returns True if it drew."""
+        key = (self.hub.emg.version, self._view_version)
+        if key == self._drawn_key:
+            return False
         rate = self.hub.emg_rate
         n = int(self.window_combo.currentData() * rate)
         data = self.hub.emg.latest(n)
         if data.shape[1] < 2:
-            return
+            return False
+        self._drawn_key = key
+        self.redraw_count += 1
         if self.dc_check.isChecked():
             data = nan_center(data)
         x = self._x(data.shape[1], rate)
@@ -158,6 +174,7 @@ class EqualScaleDashboard(QtWidgets.QWidget):
             p.setYRange(-yr, yr, padding=0)
 
         self._show_rms(self.compute_rms())
+        return True
 
     def compute_rms(self) -> np.ndarray:
         """AC RMS over the last RMS window, straight from the hub.
@@ -167,8 +184,8 @@ class EqualScaleDashboard(QtWidgets.QWidget):
         """
         ms = self.rms_combo.currentData()
         m = max(2, int(ms * self.hub.emg_rate / 1000))
-        title = (f"RMS per channel — AC, last {ms} ms, invalid samples excluded<br>"
-                 f"<small>number = RMS (signal units); % = share of summed RMS across channels</small>")
+        title = (f"AC RMS, last {ms} ms (invalid samples excluded)<br>"
+                 f"<small>value = RMS · % = share of summed RMS</small>")
         if title != self._rms_title:
             self._rms_title = title
             self.rms_plot.setTitle(title)

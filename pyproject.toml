@@ -19,6 +19,7 @@ dev = ["pytest>=8"]
 
 [project.scripts]
 gforce-emg-ui = "gforce_emg_ui.__main__:main"
+gforce-emg-ui-bench = "gforce_emg_ui.bench:main"
 
 [tool.setuptools.dynamic]
 version = { attr = "gforce_emg_ui.__version__" }

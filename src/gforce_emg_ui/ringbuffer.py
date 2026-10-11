@@ -16,6 +16,7 @@ class RingBuffer:
         self._write = 0           # next write position
         self._count = 0           # valid samples (<= capacity)
         self._total = 0           # samples ever written
+        self.version = 0          # bumps on every change (lets views skip redraws)
         self._lock = threading.Lock()
 
     def clear(self):
@@ -24,6 +25,7 @@ class RingBuffer:
             self._write = 0
             self._count = 0
             self._total = 0
+            self.version += 1
 
     @property
     def total(self) -> int:
@@ -49,6 +51,7 @@ class RingBuffer:
                 self._write = end % self.capacity
             self._count = min(self._count + n, self.capacity)
             self._total += n
+            self.version += 1
 
     def latest(self, n: int) -> np.ndarray:
         """Return the newest min(n, available) samples, oldest first, as a copy."""

@@ -22,6 +22,9 @@ class DetailDashboard(QtWidgets.QWidget):
         self.hub = hub
         self._last_fft = 0.0
         self._x_cache = {}
+        self._view_version = 0
+        self._drawn_key = None
+        self.redraw_count = 0
 
         self.window_combo = QtWidgets.QComboBox()
         for s in (1, 2, 5):
@@ -33,6 +36,8 @@ class DetailDashboard(QtWidgets.QWidget):
         bar.addWidget(self.log_check)
         bar.addStretch(1)
         self.log_check.toggled.connect(lambda on: [p.setLogMode(y=on) for p in self.fft_plots])
+        self.window_combo.currentIndexChanged.connect(self.invalidate)
+        self.log_check.toggled.connect(self._force_fft)
 
         self.view = pg.GraphicsLayoutWidget()
         self.fft_plots, self.fft_curves = [], []
@@ -79,12 +84,26 @@ class DetailDashboard(QtWidgets.QWidget):
             label.setText(f"<b>EMG-{ch + 1}</b><br>{format_kohm(impedance[ch])}",
                           color=contact_color(impedance[ch]), size="10pt")
 
-    def refresh(self):
+    def _force_fft(self, *_):
+        self._last_fft = 0.0
+        self.invalidate()
+
+    def invalidate(self, *_):
+        """A view setting changed: redraw on the next refresh even without new data."""
+        self._view_version += 1
+
+    def refresh(self) -> bool:
+        """Redraw if data or view settings changed. Returns True if it drew."""
+        key = (self.hub.emg.version, self._view_version)
+        if key == self._drawn_key:
+            return False
         rate = self.hub.emg_rate
         n = int(self.window_combo.currentData() * rate)
         data = self.hub.emg.latest(n)
         if data.shape[1] < 2:
-            return
+            return False
+        self._drawn_key = key
+        self.redraw_count += 1
         key = (data.shape[1], rate)
         x = self._x_cache.get(key)
         if x is None:
@@ -108,6 +127,7 @@ class DetailDashboard(QtWidgets.QWidget):
             self._last_fft = now
             self._update_fft(data[:, -int(rate):], rate)       # last 1 s
             self.fft_plots[0].setXRange(0, rate / 2, padding=0)
+        return True
 
     def _update_fft(self, seg, rate):
         """Spectrum of each channel's trailing run of valid samples (no NaN filling)."""

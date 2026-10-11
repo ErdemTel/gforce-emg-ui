@@ -12,7 +12,8 @@ from ..config import (EMG_CHANNELS, EMG_RATES, FILTERS, PLOT_INTERVAL_MS,
 from ..contact import LEVEL_COLORS, contact_color, format_kohm
 from ..hub import DataHub
 from ..recorder import ERROR, FINALIZING, RECORDING, SAVED, Recorder
-from ..sources import Source
+from ..sources import (CONNECTING, DISCONNECTING, FAILED, IDLE, RECONNECTING, SCANNING,
+                       STREAMING, Source)
 from .emg_detail import DetailDashboard
 from .emg_equal import EqualScaleDashboard
 from .imu_view import ImuDashboard
@@ -88,6 +89,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.status_text = QtWidgets.QLabel()
         self.statusBar().addPermanentWidget(self.status_text, 1)
 
+        source.state_changed.connect(self._on_state_changed)
         source.devices_found.connect(self._on_devices)
         source.status.connect(self._set_status)
         source.connected.connect(self._on_connected)
@@ -104,7 +106,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.status_timer.start(STATUS_INTERVAL_MS)
 
         QtWidgets.QShortcut(QtGui.QKeySequence("Ctrl+M"), self, activated=self._add_marker)
-        self._update_buttons()
+        self._on_state_changed(source.state)
 
     # -- panel ------------------------------------------------------------------
     def _build_panel(self) -> QtWidgets.QWidget:
@@ -129,6 +131,8 @@ class MainWindow(QtWidgets.QMainWindow):
         row.addWidget(self.btn_connect)
         row.addWidget(self.btn_disconnect)
         dl.addLayout(row)
+        self.state_label = QtWidgets.QLabel()
+        dl.addWidget(self.state_label)
         self.device_label = QtWidgets.QLabel("Not connected")
         self.device_label.setWordWrap(True)
         dl.addWidget(self.device_label)
@@ -206,10 +210,26 @@ class MainWindow(QtWidgets.QMainWindow):
         self.marker_edit.returnPressed.connect(self._add_marker)
         return panel
 
+    STATE_STYLE = {
+        IDLE: ("Idle", "#757575"), SCANNING: ("Scanning…", "#1565c0"),
+        CONNECTING: ("Connecting…", "#1565c0"), STREAMING: ("Streaming", "#2e7d32"),
+        RECONNECTING: ("Link lost – reconnecting…", "#ef6c00"),
+        DISCONNECTING: ("Disconnecting…", "#757575"), FAILED: ("Connection failed", "#c62828"),
+    }
+
+    def _on_state_changed(self, state: str):
+        text, color = self.STATE_STYLE.get(state, (state, "#000"))
+        self.state_label.setText(f"<b style='color:{color}'>● {text}</b>")
+        if state in (IDLE, FAILED) and self.recorder.active:
+            self._toggle_recording()       # link is gone for good: finish the file
+        self._update_buttons()
+
     def _update_buttons(self):
-        connected = self.source.is_connected
-        self.btn_connect.setEnabled(not connected and self.device_list.currentItem() is not None)
-        self.btn_disconnect.setEnabled(connected)
+        state = self.source.state
+        connected = state == STREAMING
+        self.btn_connect.setEnabled(state in (IDLE, FAILED, SCANNING)
+                                    and self.device_list.currentItem() is not None)
+        self.btn_disconnect.setEnabled(state in (CONNECTING, STREAMING, RECONNECTING))
         finalizing = self.recorder.busy and not self.recorder.active
         self.btn_record.setEnabled((connected or self.recorder.active) and not finalizing)
         self.btn_record.setText("■ Stop recording" if self.recorder.active else "● Start recording")
@@ -268,8 +288,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self._update_buttons()
 
     def _on_disconnected(self):
-        if self.recorder.active:
-            self._toggle_recording()
         self.device_label.setText("Disconnected")
         self.battery_bar.setValue(0)
         self.battery_bar.setFormat("--")
@@ -371,10 +389,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
     # -- timers -----------------------------------------------------------------
     def _refresh_plots(self):
-        w = self.tabs.currentWidget()
-        if self.hub.emg.total == 0 and w is not self.imu:
+        # Dashboards skip the redraw when neither data nor view settings changed
+        if not self.tabs.currentWidget().refresh():
             return
-        w.refresh()
         age = self.hub.emg_callback_age_ms()
         if age == age:      # not NaN
             self._age_ms = age if not self._age_ms else 0.9 * self._age_ms + 0.1 * age
@@ -395,9 +412,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 return
         if self.recorder.busy and not self.recorder.active:
             self._finalizing_seen = True
-        connected = self.source.is_connected
-        if not connected:
-            self.status_text.setText(f"backend: {self.source.backend_name() or '--'} · not streaming")
+        if self.source.state != STREAMING:
+            self.status_text.setStyleSheet("")
+            self.status_text.setText(f"backend: {self.source.backend_name() or '--'} · "
+                                     f"{self.source.state}")
             return
         rate = self.hub.emg_rate
         actual = self.hub.emg_actual_rate()
@@ -411,11 +429,17 @@ class MainWindow(QtWidgets.QMainWindow):
             f"{warn}EMG {actual:.1f}/{rate:g} Hz · "
             f"IMU {self.hub.imu_actual_rate():.1f}/{self.hub.imu_rate:g} Hz · "
             f"lost {self.hub.lost_packages} pkts / {self.hub.lost_samples} samples · "
+            f"index gaps {self.hub.missing_samples} · segment {self.hub.emg_segment} · "
+            f"{self._subscriber_error_text()}"
             f"packet {pkt / rate * 1000 if rate else 0:.0f} ms · "
             f"callback gap p95 {self.hub.emg_callback_gap_ms():.0f} ms · "
             f"callback→draw {self._age_ms:.0f} ms (host only) · "
             f"sensor→host latency: not measured · "
             f"backend {self.device_summary.get('backend', '')}")
+
+    def _subscriber_error_text(self) -> str:
+        errs = sum(self.hub.subscriber_errors.values())
+        return f"⚠ {errs} subscriber errors · " if errs else ""
 
     def closeEvent(self, event):
         if self.recorder.busy:

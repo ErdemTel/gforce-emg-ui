@@ -2,8 +2,11 @@
 keeps ring buffers for display, tracks stream statistics, and fans blocks out
 to subscribers (recorder, future real-time decoders).
 
-push_* runs on the source thread and must stay fast: copy into ring buffers,
-update counters, call subscribers. Subscribers that do heavy work must queue it.
+push_* runs on the source thread (for the real band: the SDK callback thread)
+and must stay fast: copy into ring buffers, update counters, call subscribers.
+A failing subscriber is isolated (counted in subscriber_errors, others still run).
+Heavy work such as inference must use subscribe_emg_async(), which runs it on
+its own worker thread behind a bounded queue (overflow is counted, never blocks).
 
 Data integrity rules:
   * invalid samples (lost in transit, missing channels) are NaN in block.data and
@@ -16,8 +19,10 @@ Data integrity rules:
 """
 
 import collections
+import queue
 import threading
 import time
+import traceback
 from dataclasses import dataclass
 from typing import Callable, List, Optional
 
@@ -92,6 +97,63 @@ class _Continuity:
         return new, gap
 
 
+class AsyncSubscriber:
+    """Runs fn(block) on a dedicated thread; the producer only does put_nowait.
+
+    Counters: processed (fn returned or raised), dropped (queue full), errors (fn raised).
+    """
+
+    _STOP = object()
+
+    def __init__(self, fn: Callable, maxsize: int = 64, name: str = "async"):
+        self.fn = fn
+        self.name = name
+        self.processed = 0
+        self.dropped = 0
+        self.errors = 0
+        self.last_error = ""
+        self._q: "queue.Queue" = queue.Queue(maxsize=maxsize)
+        self._detach: Optional[Callable[[], None]] = None
+        self._thread = threading.Thread(target=self._run, name=f"sub-{name}", daemon=True)
+        self._thread.start()
+
+    def __call__(self, block):
+        try:
+            self._q.put_nowait(block)
+        except queue.Full:
+            self.dropped += 1
+
+    @property
+    def pending(self) -> int:
+        return self._q.unfinished_tasks
+
+    def _run(self):
+        while True:
+            item = self._q.get()
+            try:
+                if item is self._STOP:
+                    return
+                try:
+                    self.fn(item)
+                except Exception as e:      # isolate consumer bugs
+                    self.errors += 1
+                    self.last_error = f"{type(e).__name__}: {e}"
+                    if self.errors == 1:
+                        traceback.print_exc()
+                self.processed += 1
+            finally:
+                self._q.task_done()
+
+    def stop(self, timeout: float = 2.0):
+        if self._detach is not None:
+            self._detach()
+        try:
+            self._q.put(self._STOP, timeout=timeout)
+        except queue.Full:
+            pass
+        self._thread.join(timeout)
+
+
 class _RateMeter:
     def __init__(self, window_s: float = 2.0):
         self._window = window_s
@@ -136,8 +198,9 @@ class DataHub:
         self._imu_cont = _Continuity()
         self._emg_meter = _RateMeter()
         self._imu_meter = _RateMeter()
-        self._emg_subscribers: List[Callable[[EmgBlock], None]] = []
-        self._imu_subscribers: List[Callable[[ImuBlock], None]] = []
+        self._emg_subscribers: List[tuple] = []     # (name, fn)
+        self._imu_subscribers: List[tuple] = []
+        self.subscriber_errors: dict = collections.Counter()   # name -> exceptions
 
     @property
     def emg_segment(self) -> int:
@@ -152,19 +215,40 @@ class DataHub:
         return self._emg_cont.anomalies + self._imu_cont.anomalies
 
     # -- subscription ---------------------------------------------------------
+    @staticmethod
+    def _name(fn, name):
+        return name or getattr(fn, "__qualname__", None) or repr(fn)
+
     def subscribe_emg(self, fn: Callable[[EmgBlock], None], name: Optional[str] = None):
-        self._emg_subscribers.append(fn)
+        """fn runs on the data thread: keep it fast, or use subscribe_emg_async."""
+        self._emg_subscribers = self._emg_subscribers + [(self._name(fn, name), fn)]
 
     def unsubscribe_emg(self, fn):
-        if fn in self._emg_subscribers:
-            self._emg_subscribers.remove(fn)
+        self._emg_subscribers = [(n, f) for n, f in self._emg_subscribers if f != fn]
 
     def subscribe_imu(self, fn: Callable[[ImuBlock], None], name: Optional[str] = None):
-        self._imu_subscribers.append(fn)
+        self._imu_subscribers = self._imu_subscribers + [(self._name(fn, name), fn)]
 
     def unsubscribe_imu(self, fn):
-        if fn in self._imu_subscribers:
-            self._imu_subscribers.remove(fn)
+        self._imu_subscribers = [(n, f) for n, f in self._imu_subscribers if f != fn]
+
+    def subscribe_emg_async(self, fn: Callable[[EmgBlock], None], maxsize: int = 64,
+                            name: Optional[str] = None) -> AsyncSubscriber:
+        """Run fn (e.g. a decoder) off the data thread. Call .stop() to detach."""
+        sub = AsyncSubscriber(fn, maxsize, self._name(fn, name))
+        self.subscribe_emg(sub, sub.name)
+        sub._detach = lambda: self.unsubscribe_emg(sub)
+        return sub
+
+    def _fan_out(self, subscribers, block):
+        for name, fn in subscribers:      # list is replaced, never mutated: safe snapshot
+            try:
+                fn(block)
+            except Exception:
+                self.subscriber_errors[name] += 1
+                if self.subscriber_errors[name] == 1:
+                    print(f"[DataHub] subscriber {name!r} raised (further errors only counted):")
+                    traceback.print_exc()
 
     # -- source side ----------------------------------------------------------
     @staticmethod
@@ -191,8 +275,7 @@ class DataHub:
         self.last_emg_host_time = block.host_time
         self.last_emg_host_mono = block.host_mono
         self._emg_meter.add(block.host_mono, block.data.shape[1])
-        for fn in list(self._emg_subscribers):
-            fn(block)
+        self._fan_out(self._emg_subscribers, block)
 
     def push_imu(self, block: ImuBlock):
         new, gap = self._imu_cont.update(block)
@@ -203,8 +286,7 @@ class DataHub:
             self._imu_meter.clear()
         self._append_with_gap(self.imu, block.data, gap)
         self._imu_meter.add(block.host_mono, block.data.shape[1])
-        for fn in list(self._imu_subscribers):
-            fn(block)
+        self._fan_out(self._imu_subscribers, block)
 
     # -- UI side --------------------------------------------------------------
     def reset(self):

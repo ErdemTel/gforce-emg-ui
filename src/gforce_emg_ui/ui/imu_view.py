@@ -14,6 +14,9 @@ class ImuDashboard(QtWidgets.QWidget):
     def __init__(self, hub: DataHub, parent=None):
         super().__init__(parent)
         self.hub = hub
+        self._view_version = 0
+        self._drawn_key = None
+        self.redraw_count = 0
         self.view = pg.GraphicsLayoutWidget()
         self.curves = []
         specs = (("Accelerometer", "ACC", 0), ("Gyroscope", "GYRO", 3))
@@ -34,12 +37,23 @@ class ImuDashboard(QtWidgets.QWidget):
         layout = QtWidgets.QVBoxLayout(self)
         layout.addWidget(self.view)
 
-    def refresh(self):
+    def invalidate(self, *_):
+        """A view setting changed: redraw on the next refresh even without new data."""
+        self._view_version += 1
+
+    def refresh(self) -> bool:
+        """Redraw if data or view settings changed. Returns True if it drew."""
+        key = (self.hub.imu.version, self._view_version)
+        if key == self._drawn_key:
+            return False
         rate = self.hub.imu_rate or 50
         data = self.hub.imu.latest(int(WINDOW_S * rate))
         if data.shape[1] < 2:
-            return
+            return False
+        self._drawn_key = key
+        self.redraw_count += 1
         x = (np.arange(data.shape[1]) - (data.shape[1] - 1)) / rate
         for i, curve in enumerate(self.curves):
             curve.setData(x, data[i], connect="finite")
         self.plots[0].setXRange(-WINDOW_S, 0, padding=0)
+        return True
