@@ -217,7 +217,10 @@ class MainWindow(QtWidgets.QMainWindow):
         DISCONNECTING: ("Disconnecting…", "#757575"), FAILED: ("Connection failed", "#c62828"),
     }
 
-    def _on_state_changed(self, state: str):
+    def _on_state_changed(self, _signalled_state: str = ""):
+        # State signals from SDK threads are queued and may arrive out of order
+        # (observed on hardware), so always act on the source's current state.
+        state = self.source.state
         text, color = self.STATE_STYLE.get(state, (state, "#000"))
         self.state_label.setText(f"<b style='color:{color}'>● {text}</b>")
         if state in (IDLE, FAILED) and self.recorder.active:

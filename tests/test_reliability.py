@@ -311,3 +311,29 @@ def test_benchmark_command_runs(tmp_path):
         assert key in res
     assert res["recorder"]["reconciled"] is True
     assert "not hardware" in r.stdout.lower()
+
+
+def test_stale_queued_state_signal_does_not_override_current_state(qapp, tmp_path):
+    """State signals emitted from SDK threads are queued and can arrive late
+    (seen on hardware: 'idle' from a finished disconnect delivered after the
+    next 'connecting'). The UI must act on the source's current state."""
+    from gforce_emg_ui.sources import IDLE, SimSource
+    from gforce_emg_ui.ui.main_window import MainWindow
+    hub = DataHub()
+    src = SimSource(hub, seed=1)
+    win = MainWindow(hub, src, tmp_path)
+    try:
+        src.connect_device(SimSource.ADDRESS)
+        assert wait_until(lambda: hub.emg.total > 0, 5, qapp)
+        win._toggle_recording()
+        src.state_changed.emit(IDLE)                 # stale signal
+        qapp.processEvents()
+        assert win.recorder.active                   # recording not stopped
+        assert "Streaming" in win.state_label.text()
+        assert win.btn_disconnect.isEnabled()
+    finally:
+        if win.recorder.active:
+            win._toggle_recording()
+        win.recorder.session.wait(5)
+        src.disconnect_device()
+        win.close()
