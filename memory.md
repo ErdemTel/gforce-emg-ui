@@ -7,7 +7,9 @@ Shared, version-controllable record of goals, decisions and progress.
 
 - **Repo:** `~/erdem/gforce-emg-ui` (our code, private GitHub repo `gforce-emg-ui`). SDK comes from pip `sensor-sdk>=1.3.3`.
 - **Vendor reference:** `~/erdem/SynchroniSDKPython` (OYMotion, branch `Testing`) — API docs + demos only, no SDK source.
-- **Hardware:** OYMotion **gForceUltra** armband — 8-channel EMG plus IMU (ACC, GYRO, Euler, Quaternion) and other sensors.
+- **Hardware:** OYMotion **gForceUltra** armband (vendor spec, FW V1.0.8): 8-ch EMG @ 500|1000 Hz (default 1000);
+  6-axis IMU (ACC+GYRO, aggregate `NTF_IMU`, 50 Hz only, no Euler/Quat); 8-ch electrode impedance (~1 Hz, delivered in
+  the EMG samples' `impedance` field); gesture stream; on-board filters FILTER_50HZ/60HZ/HPF(10 Hz)/LPF(200 Hz).
 - **Primary focus:** the **8-channel EMG** stream, recorded with **as little latency as possible**.
 - **Machine:** Ubuntu (host `yixiao-System-Product-Name`), Python 3.12.3. **Shared `undergrads` account** — keep git/gh credentials scoped to `~/erdem` (never change global git/gh config).
   Repo `.venv`: `sensor-sdk 1.3.3`, `PyQt5 5.15.11`, `pyqtgraph 0.14.0`, `numpy 2.x`.
@@ -27,15 +29,27 @@ Shared, version-controllable record of goals, decisions and progress.
 ## Goal
 
 Build **our own UI** (replacing `pyqt_demo.py` for our applications) centred on low-latency
-8-channel EMG visualization and recording.
+8-channel EMG visualization and recording. Downstream: **live pattern recognition**, accurate gesture
+control, **fingertip force estimation**, **compliance estimation** (muscle co-contraction).
 
-## Open decisions / requirements to pin down
+## Decisions
 
-- UI toolkit and plotting library (matplotlib in the demo is slow for real-time; pyqtgraph/vispy are candidates).
-- Recording format (CSV / NPY / HDF5 / EDF), timestamps, and metadata to save.
-- Which non-EMG streams (IMU etc.) to show/record, if any.
-- Target EMG sample rate (500 vs 1000 Hz) and how to measure end-to-end latency.
-- Downstream use (real-time classification? offline analysis? LSL streaming?).
+- EMG at **1000 Hz**; record and show **IMU** too.
+- PyQt5 + **pyqtgraph** (not matplotlib) for real-time plots; only the visible tab redraws (~30 FPS).
+- Two EMG dashboards: (1) **equal scale** — all channels same y-range + RMS bars to compare which channel fires most;
+  (2) **detail** — like `pyqt_demo.py` (FFT + per-channel autoscaled waveform).
+- Track **battery** and **electrode contact** (green ≤500 kΩ / orange ≤999 kΩ / red loose — same thresholds as the demo).
+- Recording: CSV session folders (emg/imu/contact/markers + session.json) written on a background thread.
+  Markers (Ctrl+M) label gestures for training data.
+- Real-time consumers (decoders) plug in via `DataHub.subscribe_emg`.
+- `PACKAGE_SAMPLE_COUNT` default 16 (demo uses 32) to cut batching latency — **needs verification on the real band**.
+
+## Open questions
+
+- Verify with the real band: connect path, `--package-samples 16` accepted, EMG units (µV?), whether impedance arrives
+  in EMG samples as in the demo, actual end-to-end latency.
+- Recording format may later move to HDF5/NPY or LSL streaming for the pattern-recognition pipeline.
+- Feature/decoder design for gesture, fingertip force and co-contraction estimation.
 
 ## Progress Log
 
@@ -47,7 +61,12 @@ Build **our own UI** (replacing `pyqt_demo.py` for our applications) centred on 
 - Set up repo `.venv` (adds pyqtgraph) and repo-local, isolated GitHub credentials (shared Linux account).
 - Remote-dev workflow decided: SSH + tmux as primary, Remote Control for phone check-ins (see *Remote workflow*).
 - Pushed to private GitHub repo https://github.com/ErdemTel/gforce-emg-ui (gh login `ErdemTel` isolated in `~/erdem/.config/gh`).
-- Next: define UI requirements (see *Open decisions*), then start the custom EMG UI.
+- Requirements defined (see *Decisions*). Built v0.0.1 of the UI (`python -m gforce_emg_ui [--simulate]`):
+  `SdkSource` (real band) + `SimSource` (synthetic data), `DataHub` ring buffers, equal-scale + detail EMG dashboards,
+  IMU tab, contact chips, battery, EMG-rate/filter settings, CSV recorder with markers, status bar with rates/loss/data age.
+- Tests: 5 pytest unit tests pass; headless GUI smoke test with simulator: EMG ~997/1000 Hz, redraw 3–12 ms/frame,
+  recording verified. Real-SDK path starts and scans via USB dongle, but **no band was on, so connect is untested**.
+- Next: test with the real band (connect, latency, package size, units), then start the real-time processing layer.
 
 ## Remote workflow
 
