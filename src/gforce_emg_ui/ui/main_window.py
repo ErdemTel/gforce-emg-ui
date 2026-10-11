@@ -351,9 +351,15 @@ class MainWindow(QtWidgets.QMainWindow):
             self.status_text.setText(f"backend: {self.source.backend_name() or '--'} · not streaming")
             return
         rate = self.hub.emg_rate
+        actual = self.hub.emg_actual_rate()
         pkt = self.device_summary.get("package_samples", 0)
+        # The band can deliver far fewer samples than its nominal rate (seen: ~505
+        # of 1000 Hz on FW V1.0.4); time/frequency axes assume the nominal rate.
+        mismatch = actual > 0 and abs(actual - rate) / rate > 0.05
+        self.status_text.setStyleSheet("color:#c62828; font-weight:bold;" if mismatch else "")
+        warn = "⚠ actual rate ≠ nominal, time/FFT axes off · " if mismatch else ""
         self.status_text.setText(
-            f"EMG {self.hub.emg_actual_rate():.1f}/{rate:g} Hz · "
+            f"{warn}EMG {actual:.1f}/{rate:g} Hz · "
             f"IMU {self.hub.imu_actual_rate():.1f}/{self.hub.imu_rate:g} Hz · "
             f"lost {self.hub.lost_packages} pkts / {self.hub.lost_samples} samples · "
             f"packet {pkt / rate * 1000 if rate else 0:.0f} ms · "

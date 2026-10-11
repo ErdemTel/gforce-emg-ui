@@ -44,6 +44,18 @@ control, **fingertip force estimation**, **compliance estimation** (muscle co-co
 - Real-time consumers (decoders) plug in via `DataHub.subscribe_emg`.
 - `PACKAGE_SAMPLE_COUNT` default 16 (demo uses 32) to cut batching latency — **needs verification on the real band**.
 
+## Hardware findings (band BC:93:2A:3F:80:E4, 2026-10-11)
+
+- Reports ModelName `OB6000`, FW `V1.0.4_2026-08-21` (older than spec's V1.0.8), HW 1.40, MTU 247, dongle backend.
+- **EMG delivered at ~505 Hz although EMG_SAMPLE_RATE=1000** (steady over 40 s, sample indices continuous, 0 lost).
+  Setting 500 Hz → "Error: not supported on this device". IMU: DeviceInfo says 200 Hz, getParam says 50, ~100 Hz delivered.
+  Same with package size 16 or 32 and with NTF_GEST off. Mains-hum test inconclusive (band not worn).
+- **Data arrives in bursts every ~150 ms** (dongle backend) → dominant latency, outside our code.
+- `absTimeStampInSec` = sampleIndex / nominal rate (vendor test notes) → not usable for latency.
+- Extra streams arrive: `NTF_GEST`, `NTF_IMPEDANCE` (ignored); impedance also present in EMG samples (MΩ when not worn).
+- BlueZ backend (`SENSOR_SDK_BLE_BACKEND=bluez`) could not find the band in 25 s.
+- To do: compare with pyqt_demo's "Actual:" rate line; ask OYMotion about FW update / true rate / 150 ms bursts.
+
 ## Open questions
 
 - Verify with the real band: connect path, `--package-samples 16` accepted, EMG units (µV?), whether impedance arrives
@@ -67,6 +79,8 @@ control, **fingertip force estimation**, **compliance estimation** (muscle co-co
 - Tests: 5 pytest unit tests pass; headless GUI smoke test with simulator: EMG ~997/1000 Hz, redraw 3–12 ms/frame,
   recording verified. Real-SDK path starts and scans via USB dongle, but **no band was on, so connect is untested**.
 - Next: test with the real band (connect, latency, package size, units), then start the real-time processing layer.
+- Real-band test: connect/stream/battery/params/disconnect all work via the UI's SdkSource. Found ~505 Hz effective EMG
+  rate and 150 ms delivery bursts (see *Hardware findings*). Added red status-bar warning when actual ≠ nominal rate.
 
 ## Remote workflow
 
