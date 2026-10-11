@@ -46,7 +46,8 @@ Build **our own UI** (replacing `pyqt_demo.py` for our applications) centred on 
 - Created fresh repo `~/erdem/gforce-emg-ui` (SDK via pip, vendor repo kept as reference); moved `memory.md`/`CLAUDE.md` here.
 - Set up repo `.venv` (adds pyqtgraph) and repo-local, isolated GitHub credentials (shared Linux account).
 - Remote-dev workflow decided: SSH + tmux as primary, Remote Control for phone check-ins (see *Remote workflow*).
-- Next: push to private GitHub repo; define UI requirements (see *Open decisions*), then start the custom EMG UI.
+- Pushed to private GitHub repo https://github.com/ErdemTel/gforce-emg-ui (gh login `ErdemTel` isolated in `~/erdem/.config/gh`).
+- Next: define UI requirements (see *Open decisions*), then start the custom EMG UI.
 
 ## Remote workflow
 
