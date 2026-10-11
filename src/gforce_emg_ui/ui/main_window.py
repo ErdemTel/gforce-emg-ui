@@ -1,7 +1,6 @@
 """Main window: control panel (device, battery, contact, settings, recording)
 plus dashboards in tabs. Only the visible dashboard is redrawn."""
 
-import time
 from pathlib import Path
 
 import numpy as np
@@ -376,9 +375,9 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.hub.emg.total == 0 and w is not self.imu:
             return
         w.refresh()
-        if self.hub.last_emg_host_time:
-            age = (time.time() - self.hub.last_emg_host_time) * 1000
-            self._age_ms = 0.9 * self._age_ms + 0.1 * age
+        age = self.hub.emg_callback_age_ms()
+        if age == age:      # not NaN
+            self._age_ms = age if not self._age_ms else 0.9 * self._age_ms + 0.1 * age
 
     def _refresh_status(self):
         imp = self.hub.impedance
@@ -413,7 +412,9 @@ class MainWindow(QtWidgets.QMainWindow):
             f"IMU {self.hub.imu_actual_rate():.1f}/{self.hub.imu_rate:g} Hz · "
             f"lost {self.hub.lost_packages} pkts / {self.hub.lost_samples} samples · "
             f"packet {pkt / rate * 1000 if rate else 0:.0f} ms · "
-            f"data age at draw ≈ {self._age_ms:.0f} ms · "
+            f"callback gap p95 {self.hub.emg_callback_gap_ms():.0f} ms · "
+            f"callback→draw {self._age_ms:.0f} ms (host only) · "
+            f"sensor→host latency: not measured · "
             f"backend {self.device_summary.get('backend', '')}")
 
     def closeEvent(self, event):

@@ -126,7 +126,9 @@ class DataHub:
         self.emg_rate: float = DEFAULT_EMG_RATE
         self.imu_rate: float = 50.0
         self.impedance = np.full(EMG_CHANNELS, np.nan)
-        self.last_emg_host_time: float = 0.0
+        self.last_emg_host_time: float = 0.0     # wall clock, for display only
+        self.last_emg_host_mono: float = 0.0     # monotonic, for ages / latency
+        self._emg_gaps = collections.deque(maxlen=500)  # ms between EMG callbacks
         self.lost_packages = 0
         self.lost_samples = 0
         self.missing_samples = 0
@@ -184,7 +186,10 @@ class DataHub:
             self.impedance = block.impedance
         self.lost_packages += block.lost_packages
         self.lost_samples += int(np.count_nonzero(block.lost))
+        if self.last_emg_host_mono:
+            self._emg_gaps.append((block.host_mono - self.last_emg_host_mono) * 1000.0)
         self.last_emg_host_time = block.host_time
+        self.last_emg_host_mono = block.host_mono
         self._emg_meter.add(block.host_mono, block.data.shape[1])
         for fn in list(self._emg_subscribers):
             fn(block)
@@ -211,11 +216,29 @@ class DataHub:
         self.lost_samples = 0
         self.missing_samples = 0
         self.last_emg_host_time = 0.0
+        self.last_emg_host_mono = 0.0
+        self._emg_gaps.clear()
         self._emg_meter.clear()
         self._imu_meter.clear()
 
-    def emg_actual_rate(self) -> float:
-        return self._emg_meter.rate(time.monotonic())
+    # All rates and ages use time.monotonic(); wall-clock jumps cannot distort them.
+    def emg_actual_rate(self, now: Optional[float] = None) -> float:
+        return self._emg_meter.rate(time.monotonic() if now is None else now)
 
-    def imu_actual_rate(self) -> float:
-        return self._imu_meter.rate(time.monotonic())
+    def imu_actual_rate(self, now: Optional[float] = None) -> float:
+        return self._imu_meter.rate(time.monotonic() if now is None else now)
+
+    def emg_callback_age_ms(self, now: Optional[float] = None) -> float:
+        """Host-side age of the newest EMG batch: time since its callback ran.
+
+        This is NOT sensor-to-host latency: the band's timestamps are derived
+        from sample indices, so time spent on the band and on the BLE link is unknown.
+        """
+        if not self.last_emg_host_mono:
+            return float("nan")
+        return ((time.monotonic() if now is None else now) - self.last_emg_host_mono) * 1000.0
+
+    def emg_callback_gap_ms(self, q: float = 95) -> float:
+        """Percentile of intervals between EMG callbacks (burstiness of delivery)."""
+        gaps = list(self._emg_gaps)
+        return float(np.percentile(gaps, q)) if gaps else float("nan")

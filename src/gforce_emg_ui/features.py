@@ -41,3 +41,17 @@ def trailing_valid_run(x: np.ndarray) -> int:
     """Length of the trailing run of finite samples in a 1-D array."""
     bad = np.flatnonzero(~np.isfinite(x))
     return len(x) if bad.size == 0 else len(x) - 1 - int(bad[-1])
+
+
+def rms_shares(rms: np.ndarray) -> np.ndarray:
+    """Each channel's RMS as % of the summed RMS over channels with a valid RMS.
+
+    Not a percentage of maximum voluntary contraction or of signal power; NaN
+    for channels without a valid RMS.
+    """
+    rms = np.asarray(rms, dtype=np.float64)
+    finite = np.isfinite(rms)
+    total = rms[finite].sum()
+    if total <= 0:
+        return np.where(finite, 0.0, np.nan)
+    return np.where(finite, 100.0 * rms / total, np.nan)

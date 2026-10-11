@@ -7,7 +7,7 @@ from PyQt5 import QtCore, QtWidgets
 
 from ..config import CHANNEL_COLORS, EMG_CHANNELS
 from ..contact import contact_color, format_kohm
-from ..features import ac_rms, nan_center
+from ..features import ac_rms, nan_center, rms_shares
 from ..hub import DataHub
 
 
@@ -74,7 +74,8 @@ class EqualScaleDashboard(QtWidgets.QWidget):
         self._set_labels(np.full(EMG_CHANNELS, np.nan))
 
         # -- RMS bars on one common axis --
-        self.rms_plot = pg.PlotWidget(title="RMS per channel (same scale)")
+        self.rms_plot = pg.PlotWidget()
+        self._rms_title = ""
         self.rms_plot.setMenuEnabled(False)
         self.rms_plot.setMouseEnabled(x=False, y=False)
         self.rms_plot.hideButtons()
@@ -156,9 +157,22 @@ class EqualScaleDashboard(QtWidgets.QWidget):
         for p in self.plots:
             p.setYRange(-yr, yr, padding=0)
 
-        m = max(2, int(self.rms_combo.currentData() * rate / 1000))
-        rms = ac_rms(data[:, -m:])                  # invalid samples excluded
-        self._show_rms(rms)
+        self._show_rms(self.compute_rms())
+
+    def compute_rms(self) -> np.ndarray:
+        """AC RMS over the last RMS window, straight from the hub.
+
+        Independent of the display window and of the 'Remove DC offset' view
+        option; invalid samples are excluded.
+        """
+        ms = self.rms_combo.currentData()
+        m = max(2, int(ms * self.hub.emg_rate / 1000))
+        title = (f"RMS per channel — AC, last {ms} ms, invalid samples excluded<br>"
+                 f"<small>number = RMS (signal units); % = share of summed RMS across channels</small>")
+        if title != self._rms_title:
+            self._rms_title = title
+            self.rms_plot.setTitle(title)
+        return ac_rms(self.hub.emg.latest(m))
 
     def _show_rms(self, rms):
         self.last_rms = rms
@@ -172,9 +186,9 @@ class EqualScaleDashboard(QtWidgets.QWidget):
         peak = float(heights.max()) * 1.2
         self._rms_peak = max(peak, 0.98 * self._rms_peak, 1e-3)
         self.rms_plot.setYRange(0, self._rms_peak, padding=0)
-        total = float(heights.sum()) or 1.0
+        shares = rms_shares(rms)
         for i, t in enumerate(self.bar_texts):
-            t.setText(f"{rms[i]:.0f}\n{100 * rms[i] / total:.0f}%" if finite[i] else "n/a")
+            t.setText(f"{rms[i]:.0f}\n{shares[i]:.0f}%" if finite[i] else "n/a")
             t.setPos(i, heights[i])
         self.top_label.setText(f"Strongest: CH{top + 1}  ({rms[top]:.0f} RMS)"
                                if top is not None else "Strongest: --")
