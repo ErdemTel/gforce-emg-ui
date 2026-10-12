@@ -111,6 +111,12 @@ control, **fingertip force estimation**, **compliance estimation** (muscle co-co
   * found + fixed: queued state signals can arrive out of order -> UI now reads source.state (commit after docs).
   * NOT measured: sensor→host latency (no external reference); a real radio link loss (out of range/power off).
 - Next: merge `hardening` into main; ask OYMotion about 500 Hz effective rate / 150 ms bursts on FW V1.0.4.
+- Merged `hardening` into `main` (fast-forward, 41 tests passing) and pushed; branch deleted.
+- Open items: user's interactive UI test with the band (incl. a real radio link loss: walk out of range /
+  power-cycle during recording); ask OYMotion about effective rate + 150 ms bursts; then start the
+  real-time processing layer (gesture recognition, fingertip force, co-contraction) via subscribe_emg_async.
+- This chat lives in ~/erdem/SynchroniSDKPython (session c01fdaef-90a2-4a46-97a6-311aa3b13ac1);
+  start new sessions in ~/erdem/gforce-emg-ui (inside tmux).
 
 ## Remote workflow
 
