@@ -4,14 +4,64 @@ Low-latency UI for recording and visualizing the **8-channel EMG** (+ 6-axis IMU
 OYMotion **gForceUltra** armband, built on the [`sensor-sdk`](https://pypi.org/project/sensor-sdk/)
 Python package, PyQt5 and pyqtgraph.
 
-## Setup (Ubuntu, Python ≥ 3.10)
+## Setup
+
+Requires Python ≥ 3.10 and git. `sensor-sdk` ships wheels for **Linux x86_64/arm64,
+Windows x64 and macOS on Apple Silicon (arm64)**; Intel Macs and 32-bit/ARM Windows are
+not supported by the SDK.
+
+The SDK uses a supported USB BLE dongle automatically when one is plugged in and usable,
+otherwise the OS Bluetooth stack (BlueZ / WinRT / CoreBluetooth). Check which one is active
+with `SensorController().getBLEBackendName()`, or force one with
+`SENSOR_SDK_BLE_BACKEND=dongle|bluez|winrt|darwin`.
+
+### Linux (Ubuntu)
 
 ```bash
-python3 -m venv .venv
+git clone https://github.com/ErdemTel/gforce-emg-ui.git
+cd gforce-emg-ui
+python3 -m venv .venv                 # Ubuntu: sudo apt install python3-venv if missing
 .venv/bin/pip install -e ".[dev]"
+.venv/bin/python -m gforce_emg_ui --simulate     # check the UI works without the band
 ```
 
-The SDK picks a USB BLE dongle automatically if one is present, otherwise BlueZ.
+If Qt fails to start with an `xcb` plugin error, install `sudo apt install libxcb-cursor0 libxkbcommon-x11-0`.
+
+### macOS (Apple Silicon)
+
+```bash
+git clone https://github.com/ErdemTel/gforce-emg-ui.git
+cd gforce-emg-ui
+python3 -m venv .venv                 # python.org installer or `brew install python@3.12`
+.venv/bin/pip install -e ".[dev]"
+.venv/bin/python -m gforce_emg_ui --simulate
+```
+
+- On the first scan, macOS asks for **Bluetooth permission** for the app you launched from
+  (Terminal, iTerm, VS Code…). Allow it; if you denied it, re-enable it in
+  *System Settings → Privacy & Security → Bluetooth* and restart that app.
+- A USB dongle needs no extra setup on macOS.
+
+### Windows 10/11 (x64)
+
+In PowerShell:
+
+```powershell
+git clone https://github.com/ErdemTel/gforce-emg-ui.git
+cd gforce-emg-ui
+py -3.12 -m venv .venv                # python.org installer; any 3.10+ works
+.venv\Scripts\python -m pip install -e ".[dev]"
+.venv\Scripts\python -m gforce_emg_ui --simulate
+```
+
+- Turn Bluetooth on in *Settings → Bluetooth & devices*. Do **not** pair the band in Windows
+  settings; the app scans and connects to it directly.
+- To use a USB BLE dongle instead of the built-in adapter, run the SDK's one-time driver setup
+  (it shows an administrator prompt) and expect `OK`:
+  ```powershell
+  .venv\Scripts\python -c "from sensor import SensorController; print(SensorController().checkSetupDongle())"
+  ```
+  The same command performs the permission setup on Linux (asks for `sudo`).
 
 ## Run
 
@@ -19,6 +69,9 @@ The SDK picks a USB BLE dongle automatically if one is present, otherwise BlueZ.
 .venv/bin/python -m gforce_emg_ui              # real band (Scan → select → Connect)
 .venv/bin/python -m gforce_emg_ui --simulate   # synthetic data, no hardware needed
 ```
+
+On Windows use `.venv\Scripts\python` instead of `.venv/bin/python` (also for the test and
+benchmark commands below).
 
 Options: `--emg-rate {500,1000}` (default 1000), `--package-samples N` (samples per BLE
 callback, default 16; lower = less latency, the vendor demo uses 32), `--data-dir PATH`.

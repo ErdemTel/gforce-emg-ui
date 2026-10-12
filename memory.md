@@ -118,6 +118,11 @@ control, **fingertip force estimation**, **compliance estimation** (muscle co-co
 - This chat lives in ~/erdem/SynchroniSDKPython (session c01fdaef-90a2-4a46-97a6-311aa3b13ac1);
   start new sessions in ~/erdem/gforce-emg-ui (inside tmux).
 
+### 2026-10-12
+- README: added setup instructions for macOS (Apple Silicon only; SDK has no Intel-Mac wheel) and
+  Windows x64 (PowerShell, `.venv\Scripts\python`, dongle driver via `checkSetupDongle()`).
+  Written from the SDK docs; not tried on a Mac or Windows machine yet.
+
 ## Remote workflow
 
 - Primary: `ssh undergrads@128.32.164.118` → `tmux new -As emg` → `cd ~/erdem/gforce-emg-ui && claude --continue`.
