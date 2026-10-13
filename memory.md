@@ -51,17 +51,87 @@ control, **fingertip force estimation**, **compliance estimation** (muscle co-co
   Setting 500 Hz → "Error: not supported on this device". IMU: DeviceInfo says 200 Hz, getParam says 50, ~100 Hz delivered.
   Same with package size 16 or 32 and with NTF_GEST off. Mains-hum test inconclusive (band not worn).
 - **Data arrives in bursts every ~150 ms** (dongle backend) → dominant latency, outside our code.
-- `absTimeStampInSec` = sampleIndex / nominal rate (vendor test notes) → not usable for latency.
+- `absTimeStampInSec` = stream-start wall-clock anchor + sampleIndex / 1000 (checked 2026-10-13 in both recordings:
+  anchor 1791919335.373, spread < 1 µs) → the SDK timeline runs at ~0.50× host time; not a sensor clock, not latency.
 - Extra streams arrive: `NTF_GEST`, `NTF_IMPEDANCE` (ignored); impedance also present in EMG samples (MΩ when not worn).
 - BlueZ backend (`SENSOR_SDK_BLE_BACKEND=bluez`) could not find the band in 25 s.
 - To do: compare with pyqt_demo's "Actual:" rate line; ask OYMotion about FW update / true rate / 150 ms bursts.
 
+## Lessons: EMG recording interface (2026-10-13)
+
+Research use: EMG recorded during human demonstrations as training-time supervision for robot gain/compliance
+selection. Pre-contact timing and avoiding artifact-based labels matter more than smooth plots. "Contact" in
+contact.csv = electrode-skin electrical contact, never finger/object contact.
+
+**sensor-sdk 1.3.3 (installed sources read; differs in places from the Testing-branch README)**
+- `SensorData` in the data callback is a *view*: sample buffer and batch info point into native memory the SDK
+  reuses. Copy everything before returning. `isDataValid(ch, i)` = same stream tag (`startTimeStamp`) AND slot
+  sampleIndex == `startSampleIndex + i`; checking it before AND after the copy detects reused/torn buffers
+  (the vendor demo calls it and logs "your data process runs too slow").
+- Available per batch: `sampleRate`, `channelCount`, `channelMask` (`isChannelEnabled`), `sampleCount`,
+  `lostPackageCount`, `startTimeStamp`, `startTimeSec` (wall-clock stream anchor, 0 = unknown), `delay`,
+  `startSampleIndex`, `as_numpy()`, `clone()`. 1.3.3 has no `channelSamples` (README mentions it).
+- `delay` = first raw packet's bin-record time minus `startTimeStamp` (vendor tests): NOT latency.
+- One callback can carry several batches/streams; a batch is not necessarily one BLE packet. On our band we
+  observed exactly 1 EMG batch (16 rows) per callback and 1 IMU sample per callback.
+- `rawData` / `saturation` meanings for EMG are undocumented; the vendor demo reuses `impedance`/`saturation` as
+  gesture probability/strength → never treat `saturation` as an ADC clipping flag. ADC rails/gain unknown.
+- Filter cutoffs: SDK README lists 0.5 Hz HPF / 80 Hz LPF (other devices); gForceUltra test spec (FW V1.0.8) lists
+  10 Hz / 200 Hz; neither verified for our FW V1.0.4.
+- SDK README says `SensorProfile.autoReconnect` defaults to True (Python wrapper property reports False) — possible
+  overlap with our own reconnect loop; not investigated.
+- Diagnostics via supported keys (untested on hardware): controller `setParam("LOG_PATH", dir)`,
+  `("DEBUG_ENABLED","True")`, optional `DATA_LOG_ENABLED`/`BLE_TRACE_ENABLED`; profile `DEBUG_LOG_PATH` and
+  `DEBUG_BLE_DATA_PATH` (raw BLE .bin exported on stop/disconnect); `getBinFileInfo`, `parseBinToCsv`.
+  Readable params: `EMG_SAMPLE_RATE(_LIST)`, `IMU_SAMPLE_RATE(_LIST)`, `FILTER`, `NTF`, `EMG_RESOLUTION(_LIST)`,
+  controller `BACK_END`, timeouts; DeviceInfo has `ConnectionIntervalMs`, `PeripheralLatency`, `SupervisionTimeoutMs`.
+
+**Timing evidence from the 2 local recordings (identified by rows/index range, v1 layout)**
+- test1: 12,928 rows, idx 104640–117567, host span 25.631714 s, SDK span 12.927 s, 503.8 rows/s (regression 501.6/s).
+  test2: 70,032 rows, idx 632928–702959, host span 139.397263 s, SDK span 70.031 s, 502.3 rows/s, block-index vs
+  receipt-time regression 501.75/s; 0 gaps/NaN/lost. Bursts every 151.7 ms (~4.76 batches, ~76 rows), receipt gap
+  p50 0.35 ms / p95 150.5 ms. IMU 100.0 rows/s vs 200 Hz reported. EMG/IMU index progression ratio 5.017 (nominal
+  5.000) → possibly separate clocks (unverified).
+- With all filters ON the spectrum has narrow 20–29 dB notches at 0.100/0.120/0.200/0.240/0.300/0.360/0.400
+  cycles/sample and none at 0.05/0.06 → 50/60 Hz notch comb acting on a ~500 samples/s basis. A strong hint, NOT a
+  verification (firmware filter design undocumented). Apparent quantization step ≈ 0.0795 µV.
+- Rules: received throughput ≠ acquisition rate; continuous indices ≠ lossless acquisition; callback gaps, SDK
+  `delay` and callback→draw age ≠ sensor→host latency. Never "correct" device_time, never substitute host time,
+  never interpolate missing data. Keep requested / readback / reported / received / verified / assumed rates apart.
+- External check (planned): record with FILTER_50HZ/60HZ OFF, find the mains peak (60 Hz here): 0.120 cycles/sample
+  ⇒ ~500/s, 0.060 ⇒ ~1000/s; confirm it is mains (vanishes with notch ON, harmonics fit). Also compare against
+  `pyqt_demo.py` with matched settings (demo uses packageSampleCount 32; its "Actual" = non-lost ch0 samples since
+  stream start / wall-clock time). Caveat: the vendor rate script counts `max-min index + 1`, i.e. includes missing.
+
+**Electrode-skin impedance**
+- The SDK copies its latest impedance into every EMG sample: repeated values are cached observations, not new
+  measurements; values can change mid-batch (keep the sample position); measurement age is unknown. Changes arrive
+  ~every 1.06 s (receipt time). test2: CH3 > 500 kΩ in 9 of 141 rows (48–49 s, 62–68 s; max 940.7 kΩ), CH7 in 2
+  (48–49 s; max 924.7 kΩ); large EMG transients (robust z > 10) mostly occur while the channel is green (CH3: 82 of
+  98), some before a warning → association only, neither proves artifact.
+- 500/999 kΩ colours are the vendor demo's display convention, not a validity threshold. 0, negative, inf or
+  sentinel values should be "unknown", never green. Never auto-exclude channels on impedance alone.
+- NTF_IMPEDANCE batches also arrive (vendor tests: 1 Hz, batched by packageSampleCount → one batch every ~16–20 s);
+  which field (`data` vs `impedance`), units and channel order are unverified.
+
+**Gaps in the current `main` code (0.0.1) found while working — not fixed on main**
+- `_on_data` copies but never checks `isDataValid`/`startSampleIndex`; ignores `channelMask`; lost flag from ch0 only.
+- contact.csv: last value per batch, only on change, `host_time` only (no host_mono / sample index / provenance),
+  no initial row per segment; `contact_level(0)` → green.
+- Plots, FFT and RMS "ms" windows use the nominal 1000 Hz → ~2× off on this band (status bar warns).
+- An exception after STREAMING in `_connect_worker` (e.g. `getDeviceInfo`) runs cleanup → Disconnected → reconnect loop.
+- Markers store the LAST RECEIVED EMG index, not the sample acquired at the event.
+
 ## Open questions
 
-- Verify with the real band: connect path, `--package-samples 16` accepted, EMG units (µV?), whether impedance arrives
-  in EMG samples as in the demo, actual end-to-end latency.
+- True EMG acquisition rate on FW V1.0.4 (500 Hz ADC? 1000 Hz + decimation?), why `EMG_SAMPLE_RATE=500` is refused,
+  FW update path, cause of the ~150 ms bursts (connection interval / peripheral latency?) — ask OYMotion.
+- Sensor→host latency: not measured; needs an independent reference (synchronized trigger).
+- NTF_IMPEDANCE field/units/channel order; rawData/saturation meaning; ADC rails/gain; channelMask semantics;
+  IMU 200 vs 50 vs 100 Hz; EMG vs IMU clock domains.
 - Recording format may later move to HDF5/NPY or LSL streaming for the pattern-recognition pipeline.
-- Feature/decoder design for gesture, fingertip force and co-contraction estimation.
+- Feature/decoder design for gesture, fingertip force and co-contraction estimation (causal windows that reset at
+  gaps/segments; millisecond windows only with a verified rate).
 
 ## Progress Log
 
@@ -122,6 +192,14 @@ control, **fingertip force estimation**, **compliance estimation** (muscle co-co
 - README: added setup instructions for macOS (Apple Silicon only; SDK has no Intel-Mac wheel) and
   Windows x64 (PowerShell, `.venv\Scripts\python`, dongle driver via `checkSetupDongle()`).
   Written from the SDK docs; not tried on a Mac or Windows machine yet.
+
+### 2026-10-13
+- Built a larger reliability update (0.1.0: rate separation, buffer validation, schema v2 recorder, contact
+  provenance, offline audit, headless capture) and pushed it as branch `reliability-0.1.0`; user then decided to
+  keep the `main` version (0.0.1). Branch deleted locally and on GitHub; only the lessons above were kept.
+  (The commit 0e6a20f stays recoverable locally via reflog for a while: `git branch reliability-0.1.0 0e6a20f`.)
+- Audited both local recordings with that tool (lessons above); no hardware run this session.
+- Next: hardware validation (mains reference, vendor-demo comparison), ask OYMotion the open questions.
 
 ## Remote workflow
 
