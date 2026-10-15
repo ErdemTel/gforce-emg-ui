@@ -2,12 +2,68 @@
 __pycache__/
 *.pyc
 *.egg-info/
+.pytest_cache/
 build/
 dist/
 .idea/
 .vscode/
-# recordings / logs
+
+# private notes / AI-assistant context (repo is public)
+CLAUDE.md
+CLAUDE.local.md
+memory.md
+MEMORY.md
+.claude/
+
+# recordings, participant data, datasets: never commit
 data/*
 !data/.gitkeep
+recordings/
+datasets/
+stiffness_collection/
+audits/
+session.json
+trial.json
+plan_*.json
+objects.json
+*.csv
+*.tsv
 *.bin
+*.npy
+*.npz
+*.mat
+*.h5
+*.hdf5
+*.parquet
+*.feather
+*.pkl
+*.pickle
+*.edf
+*.bdf
+
+# trained models / training runs
+models/
+checkpoints/
+runs/
+wandb/
+mlruns/
+lightning_logs/
+*.pt
+*.pth
+*.ckpt
+*.onnx
+*.joblib
+*.safetensors
+*.tflite
+*.keras
+
+# logs
 *.log
+
+# credentials
+.env
+.env.*
+!.env.example
+*.token
+*.pem
+*.key
