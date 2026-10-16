@@ -74,7 +74,8 @@ On Windows use `.venv\Scripts\python` instead of `.venv/bin/python` (also for th
 benchmark commands below).
 
 Options: `--emg-rate {500,1000}` (default 1000), `--package-samples N` (samples per BLE
-callback, default 16; lower = less latency, the vendor demo uses 32), `--data-dir PATH`.
+callback, default 16; lower = less latency, the vendor demo uses 32), `--data-dir PATH`,
+`--sim-contact {default,good}` (simulator only; `good` = all electrodes good).
 
 ## Features
 
@@ -86,7 +87,7 @@ callback, default 16; lower = less latency, the vendor demo uses 32), `--data-di
 | **Electrode contact** | 8 chips colored by impedance: green ≤ 500 kΩ, orange ≤ 999 kΩ, red = loose (thresholds from the vendor demo); channel labels on both EMG tabs use the same colors |
 | **Battery** | Percentage bar, updated by the band |
 | **Settings** | EMG sample rate 500/1000 Hz, on-board filters (50/60 Hz notch, 10 Hz HPF, 200 Hz LPF) |
-| **Recording** | CSV session folders with markers (Ctrl+M) for labelling gestures |
+| **Recording** | Two subtabs sharing one recorder: **Manual** (CSV session folders with markers, Ctrl+M) and **Stiffness Collection** (guided, timed, labelled trials; see below) |
 | **Status bar** | Actual vs nominal rates (red warning on mismatch), lost packets/samples, index gaps, segment, callback gap p95, host-only callback→draw age; sensor→host latency is reported as not measured |
 
 ## Recordings
@@ -115,6 +116,75 @@ queue overflow).
 - Counts in `session.json`: `received == enqueued + dropped`, `written == enqueued` when saved;
   `rejected` = data that arrived after the session closed (not written).
 
+## Stiffness collection
+
+Recording → **Stiffness Collection** records timed trials with one instructed effort level
+each (data collection only). Raw files are the same as for manual recordings.
+
+```bash
+.venv/bin/python -m gforce_emg_ui                                  # real band
+.venv/bin/python -m gforce_emg_ui --simulate --sim-contact good    # software test
+```
+
+**Protocol** (durations editable under *Protocol & plan settings*, saved per trial):
+PREPARE 5 s → SETTLE 3 s → **HOLD 5 s** (only training candidate) → REST 15 s, then stop,
+save and review. *Extend rest* adds 15 s; *Abort* instead of pausing. Next trial starts
+only when you click Start.
+
+**Movement** (one per trial, saved as `motion_condition` with a versioned instruction):
+stationary, wrist flexion/extension, forearm rotation, reach/sweep. Moving trials start the
+movement in SETTLE and continue it through HOLD; HOLD means keeping the instructed effort,
+not staying still. Movement is never rejected automatically; contact and recording checks
+still apply.
+
+**Labels** (`label_source = instructed_effort`; not measured stiffness or co-contraction):
+
+| target | class | s | instruction |
+|---|---|---|---|
+| low | 0 | 0.0 | minimum comfortable effort, keep the grasp/fist (do not open the hand) |
+| medium | 1 | 0.5 | repeatable moderate effort between low and high (not 50 % of anything) |
+| high | 2 | 1.0 | firm, comfortable, repeatable, not maximal; rest on fatigue |
+
+**Start is enabled only when**, for 3 s: streaming, newest EMG batch ≤ 0.5 s old (verify on
+the band), all 8 channels delivering, no red contact (green and orange OK; invalid = unknown),
+form valid, recorder free. EMG amplitude is never checked. The SDK gives no impedance
+timestamp, so freshness comes from EMG batches.
+
+**Aborts** (partial data kept, reason saved, no resume): link loss, stale stream, segment
+reset, recorder or trial.json error, phase overrun > 1 s, manual Stop, Disconnect, closing
+the app. Red/unknown contact, lost/invalid samples and gaps during HOLD flag it; flagged HOLDs
+cannot be accepted.
+
+**Plan** (*Mode → Plan*, *New…*): 200 accepted development trials per participant, seeded
+order, no target run > 2, saved before the first trial, resumed in later sessions. Each
+condition × target cell is split over the four movements (≥ 2 each; 50 per movement).
+Older plan files without movement are used unchanged; their trials are recorded stationary.
+
+| empty_hand (fist) | obj01 | obj02 | obj03 | obj04 | obj05 |
+|---|---|---|---|---|---|
+| 13/13/14 | 11/11/10 | 11/11/10 | 11/11/10 | 11/10/11 | 10/11/11 |
+
+Accept counts a planned trial once; Reject moves on (trial comes back later); Repeat retries
+now. Every attempt is a new folder. Progress is recomputed from `trial.json` files.
+*Mode → Manual* is for practice / held-out tests (never counted).
+
+```
+<data-dir>/stiffness_collection/P01/
+  plan_plan-1a2b3c4d.json
+  S01/20261015_134056_obj05_medium_s0p5_t001_a01_f889bbb8/
+    emg.csv imu.csv contact.csv markers.csv session.json trial.json
+<data-dir>/stiffness_collection/simulated/...      simulator data, never real
+```
+
+`markers.csv`: `PREPARE_START … HOLD_START, HOLD_END … TRIAL_END` (or `ABORT`). `trial.json`:
+IDs, condition, labels, settings, phase times, device/rates/filters, contact snapshot,
+quality, outcomes, review; `training_candidate` = HOLD interval in `host_mono` (batch
+receipt time: trim boundaries when processing).
+
+**First hardware session:** check rate/filters, run a few practice trials per target,
+inspect their `emg.csv` / `markers.csv` / `trial.json`, confirm no false stale aborts with
+the 0.5 s limit, then start the plan.
+
 ## Connection states
 
 `idle → scanning → connecting → streaming`. A failed connect cleans up and ends in `failed`.
@@ -134,6 +204,9 @@ band (BLE) ─► SdkSource._on_data (SDK thread: copy out of native buffers, ma
                  └──► subscribe_emg_async(decoder) (own thread, bounded queue)
 ```
 
+Stiffness collection (`collection/`, `ui/collection_panel.py`) reuses the `Recorder`, adds a
+small `subscribe_emg` tracker and writes its JSON files on one background thread.
+
 `SimSource` implements the same interface (and state machine) for hardware-free development,
 with reproducible fault injection (`SimFaults`: lost samples, missing channels, index jumps,
 failed connects; `inject_disconnect()`). For real-time processing (gesture recognition,
@@ -145,6 +218,7 @@ and counted. Features live in `features.py` (`ac_rms` excludes invalid samples).
 
 ```bash
 .venv/bin/python -m pytest                     # unit + regression + fault-injection tests
+.venv/bin/python -m pytest tests/test_collection_*.py   # stiffness collection only
 .venv/bin/python -m gforce_emg_ui.bench        # host-only benchmark (add --quick, --json out.json)
 ```
 

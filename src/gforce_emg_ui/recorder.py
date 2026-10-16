@@ -140,8 +140,12 @@ class RecordingSession:
         self._unsubscribe()
         self._stop.set()
 
-    def add_marker(self, label: str):
-        t, mono = time.time(), time.monotonic()
+    def add_marker(self, label: str, host_time: Optional[float] = None,
+                   host_mono: Optional[float] = None):
+        """Queue a marker. host_time/host_mono default to now; a caller that
+        timestamps its own event (e.g. a protocol phase change) may pass them."""
+        t = time.time() if host_time is None else host_time
+        mono = time.monotonic() if host_mono is None else host_mono
         with self._lock:
             if not self._accepting:
                 self.counts["markers"]["rejected"] += 1
@@ -325,15 +329,18 @@ class Recorder:
         """A session exists whose writer has not finished yet."""
         return self.session is not None and not self.session.done
 
-    def start(self, name: str = "", metadata: Optional[dict] = None) -> RecordingSession:
+    def start(self, name: str = "", metadata: Optional[dict] = None,
+              root: Optional[Path] = None) -> RecordingSession:
+        """root overrides self.root for this session only (self.root is unchanged)."""
         if self.busy:
             raise RuntimeError("previous recording is still in progress")
+        root = self.root if root is None else Path(root)
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         safe = re.sub(r"[^A-Za-z0-9_-]+", "_", name.strip()).strip("_")
         base = f"{stamp}_{safe}" if safe else stamp
-        self.root.mkdir(parents=True, exist_ok=True)
+        root.mkdir(parents=True, exist_ok=True)
         for i in range(1, 1000):
-            folder = self.root / (base if i == 1 else f"{base}-{i}")
+            folder = root / (base if i == 1 else f"{base}-{i}")
             try:
                 folder.mkdir()
                 break
@@ -350,6 +357,7 @@ class Recorder:
             self.session.request_stop()
         return self.session
 
-    def add_marker(self, label: str):
+    def add_marker(self, label: str, host_time: Optional[float] = None,
+                   host_mono: Optional[float] = None):
         if self.active:
-            self.session.add_marker(label)
+            self.session.add_marker(label, host_time, host_mono)

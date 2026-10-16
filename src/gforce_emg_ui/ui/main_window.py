@@ -14,6 +14,7 @@ from ..hub import DataHub
 from ..recorder import ERROR, FINALIZING, RECORDING, SAVED, Recorder
 from ..sources import (CONNECTING, DISCONNECTING, FAILED, IDLE, RECONNECTING, SCANNING,
                        STREAMING, Source)
+from .collection_panel import StiffnessCollectionPanel
 from .emg_detail import DetailDashboard
 from .emg_equal import EqualScaleDashboard
 from .imu_view import ImuDashboard
@@ -44,10 +45,15 @@ class ContactStrip(QtWidgets.QWidget):
         self.update_contact(np.full(EMG_CHANNELS, np.nan))
 
     def update_contact(self, impedance):
+        # Only on change: a restyle re-lays out and repaints the whole side panel
         for ch, chip in enumerate(self.chips):
-            chip.setText(f"CH{ch + 1}\n{format_kohm(impedance[ch])}")
-            chip.setStyleSheet(f"background:{contact_color(impedance[ch])}; color:white;"
-                               "border-radius:4px; font-weight:bold;")
+            text = f"CH{ch + 1}\n{format_kohm(impedance[ch])}"
+            css = (f"background:{contact_color(impedance[ch])}; color:white;"
+                   "border-radius:4px; font-weight:bold;")
+            if chip.text() != text:
+                chip.setText(text)
+            if chip.styleSheet() != css:
+                chip.setStyleSheet(css)
 
 
 class MainWindow(QtWidgets.QMainWindow):
@@ -55,6 +61,7 @@ class MainWindow(QtWidgets.QMainWindow):
         super().__init__()
         self.hub = hub
         self.source = source
+        self._data_dir = Path(data_dir)
         self.recorder = Recorder(hub, data_dir)
         self.device_summary = {}
         self.current_params = {}
@@ -176,7 +183,14 @@ class MainWindow(QtWidgets.QMainWindow):
         v.addWidget(st)
 
         rec = QtWidgets.QGroupBox("Recording")
-        rl = QtWidgets.QFormLayout(rec)
+        rv = QtWidgets.QVBoxLayout(rec)
+        # Both subtabs share self.recorder; at most one recording at a time
+        self.collection_panel = StiffnessCollectionPanel(
+            self.hub, self.recorder, self.source, self._data_dir, context=self._collection_context)
+        self.collection = self.collection_panel.controller
+        rv.addWidget(self.collection_panel.summary_label)
+        manual = QtWidgets.QWidget()
+        rl = QtWidgets.QFormLayout(manual)
         self.session_name = QtWidgets.QLineEdit()
         self.session_name.setPlaceholderText("e.g. subj01_fist_trial1")
         rl.addRow("Name", self.session_name)
@@ -190,14 +204,37 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_record.setStyleSheet("font-weight:bold;")
         rl.addRow(self.btn_record)
         self.record_label = QtWidgets.QLabel("Idle")
+        self.record_label.setWordWrap(True)
         rl.addRow(self.record_label)
         self.marker_edit = QtWidgets.QLineEdit()
         self.marker_edit.setPlaceholderText("label, e.g. fist_on")
         self.btn_marker = QtWidgets.QPushButton("Add marker (Ctrl+M)")
         rl.addRow("Marker", self.marker_edit)
         rl.addRow(self.btn_marker)
+        # Tab bar + framed pages, only the current one shown: unlike QTabWidget the
+        # section is as tall as the visible page. Switching never touches acquisition,
+        # the recorder or the collection timer.
+        self.record_tabs = QtWidgets.QTabBar()
+        self.record_tabs.setExpanding(False)
+        self.record_tabs.setDrawBase(False)
+        self.record_tabs.addTab("Manual")
+        self.record_tabs.addTab("Stiffness Collection")
+        pages = QtWidgets.QFrame()
+        pages.setFrameShape(QtWidgets.QFrame.StyledPanel)
+        pl = QtWidgets.QVBoxLayout(pages)
+        pl.setContentsMargins(2, 2, 2, 2)
+        self._record_pages = (manual, self.collection_panel)
+        for page in self._record_pages:
+            pl.addWidget(page)
+        self.collection_panel.wheel_guard.guard(self.record_tabs)
+        self.record_tabs.currentChanged.connect(self._show_record_page)
+        self._show_record_page(0)
+        rv.setSpacing(0)
+        rv.addWidget(self.record_tabs)
+        rv.addWidget(pages)
         v.addWidget(rec)
         v.addStretch(1)
+        self.collection_panel.recorder_changed.connect(self._update_buttons)
 
         self.btn_scan.clicked.connect(self._scan)
         self.btn_stop_scan.clicked.connect(self.source.stop_scan)
@@ -209,6 +246,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_marker.clicked.connect(self._add_marker)
         self.marker_edit.returnPressed.connect(self._add_marker)
         return panel
+
+    def _show_record_page(self, index: int):
+        for i, page in enumerate(self._record_pages):
+            page.setVisible(i == index)
 
     STATE_STYLE = {
         IDLE: ("Idle", "#757575"), SCANNING: ("Scanning…", "#1565c0"),
@@ -223,7 +264,13 @@ class MainWindow(QtWidgets.QMainWindow):
         state = self.source.state
         text, color = self.STATE_STYLE.get(state, (state, "#000"))
         self.state_label.setText(f"<b style='color:{color}'>● {text}</b>")
-        if state in (IDLE, FAILED) and self.recorder.active:
+        if self.collection.owns_recorder:
+            # A stiffness trial never continues across a link loss or reconnect
+            if state in (IDLE, FAILED):
+                self.collection_panel.abort("disconnected")
+            elif state == RECONNECTING:
+                self.collection_panel.abort("link_lost")
+        elif state in (IDLE, FAILED) and self.recorder.active:
             self._toggle_recording()       # link is gone for good: finish the file
         self._update_buttons()
 
@@ -234,9 +281,12 @@ class MainWindow(QtWidgets.QMainWindow):
                                     and self.device_list.currentItem() is not None)
         self.btn_disconnect.setEnabled(state in (CONNECTING, STREAMING, RECONNECTING))
         finalizing = self.recorder.busy and not self.recorder.active
+        trial = self.collection.owns_recorder
         self.btn_record.setEnabled((connected or self.recorder.active) and not finalizing)
-        self.btn_record.setText("■ Stop recording" if self.recorder.active else "● Start recording")
-        self.btn_marker.setEnabled(self.recorder.active)
+        self.btn_record.setText("■ Stop (aborts stiffness trial)" if trial and self.recorder.active
+                                else "■ Stop recording" if self.recorder.active
+                                else "● Start recording")
+        self.btn_marker.setEnabled(self.recorder.active and not trial)
         # Firmware filters and sample rate are locked while a recording is open
         locked = self.recorder.busy
         if self.source.settings_locked != locked:
@@ -276,7 +326,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.source.connect_device(item.data(QtCore.Qt.UserRole))
 
     def _disconnect(self):
-        if self.recorder.active:
+        if self.collection.owns_recorder:
+            self.collection_panel.abort("user_disconnect")
+        elif self.recorder.active:
             self._toggle_recording()
         self.source.disconnect_device()
 
@@ -300,7 +352,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.battery_bar.setValue(pct)
         self.battery_bar.setFormat(f"{pct}%")
         color = "#2e7d32" if pct > 40 else "#ef6c00" if pct > 15 else "#c62828"
-        self.battery_bar.setStyleSheet(f"QProgressBar::chunk {{ background: {color}; }}")
+        css = f"QProgressBar::chunk {{ background: {color}; }}"
+        if self.battery_bar.styleSheet() != css:
+            self.battery_bar.setStyleSheet(css)
 
     def _on_params(self, params: dict):
         self.current_params = params
@@ -336,8 +390,18 @@ class MainWindow(QtWidgets.QMainWindow):
             self.recorder.root = Path(d)
             self.folder_label.setText(d)
 
+    def _collection_context(self) -> dict:
+        """Device / settings info saved with every stiffness-collection attempt."""
+        return {"device": dict(self.device_summary), "params": dict(self.current_params)}
+
     def _toggle_recording(self):
         """Start, or request stop (non-blocking; the status timer reports the outcome)."""
+        if self.collection.owns_recorder:
+            # Manual Stop while a stiffness trial records: abort that trial properly
+            if self.collection_panel.abort("manual_stop"):
+                self._set_status("Stiffness trial aborted (manual Stop); finalizing…")
+            self._update_buttons()
+            return
         if self.recorder.active:
             self.recorder.stop()
             self._set_status("Finalizing recording…")
@@ -380,10 +444,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 f"<b style='color:#c62828'>ERROR{suffix}:</b> {s.error}<br>"
                 f"written {emg['written']} / received {emg['received']} EMG samples, "
                 f"dropped {emg['dropped']} · {s.folder}")
-        self.record_label.setWordWrap(True)
 
     def _add_marker(self):
-        if not self.recorder.active:
+        if not self.recorder.active or self.collection.owns_recorder:
             return
         n = self.recorder.session.counts["markers"]["received"]
         label = self.marker_edit.text().strip() or f"marker{n + 1}"
@@ -407,7 +470,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._update_record_label()
         if self.source.settings_locked != self.recorder.busy:
             self._update_buttons()          # e.g. session ended by a writer error
-        if self._finalizing_seen and not self.recorder.busy:
+        if self._finalizing_seen and not self.recorder.busy and not self.collection.busy:
             self._finalizing_seen = False
             self._update_buttons()
             if self._close_pending:
@@ -445,10 +508,13 @@ class MainWindow(QtWidgets.QMainWindow):
         return f"⚠ {errs} subscriber errors · " if errs else ""
 
     def closeEvent(self, event):
-        if self.recorder.busy:
+        if self.recorder.busy or self.collection.busy:
             # Never block the event loop on the writer: stop, keep the window
-            # until the status timer sees the session finish, then close.
-            self.recorder.stop()
+            # until the status timer sees the session (and trial.json) finish, then close.
+            if self.collection.owns_recorder:
+                self.collection_panel.abort("app_close")
+            elif self.recorder.busy:
+                self.recorder.stop()
             self._close_pending = True
             self._finalizing_seen = True
             self._set_status("Finishing the recording before closing…")
@@ -456,5 +522,6 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         self.plot_timer.stop()
         self.status_timer.stop()
+        self.collection_panel.shutdown()
         self.source.shutdown()
         event.accept()

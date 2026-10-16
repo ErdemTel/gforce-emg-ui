@@ -20,7 +20,12 @@ def main(argv=None):
                     help="samples per BLE data callback (lower = less latency)")
     ap.add_argument("--data-dir", type=Path, default=Path.cwd() / "data",
                     help="where recordings are saved")
+    ap.add_argument("--sim-contact", choices=("default", "good"), default="default",
+                    help="simulator only: electrode-contact scenario ('good' = all 8 "
+                         "channels good, to exercise the stiffness-collection workflow)")
     args = ap.parse_args(argv)
+    if args.sim_contact != "default" and not args.simulate:
+        ap.error("--sim-contact requires --simulate")
 
     app = QtWidgets.QApplication(sys.argv[:1])
     pg.setConfigOptions(antialias=False, background="w", foreground="k")
@@ -28,7 +33,7 @@ def main(argv=None):
     hub = DataHub()
     if args.simulate:
         from .sources import SimSource
-        source = SimSource(hub, args.emg_rate, args.package_samples)
+        source = SimSource(hub, args.emg_rate, args.package_samples, contact=args.sim_contact)
     else:
         from .sources import SdkSource
         source = SdkSource(hub, args.emg_rate, args.package_samples)

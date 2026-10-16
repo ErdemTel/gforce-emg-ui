@@ -38,6 +38,8 @@ class Source(QtCore.QObject):
     params = QtCore.pyqtSignal(dict)           # {"emg_rate": int, "filters": {key: bool}}
     error = QtCore.pyqtSignal(str)
 
+    is_simulation = False             # True for synthetic data (never real recordings)
+
     def __init__(self, hub: DataHub, emg_rate: int = DEFAULT_EMG_RATE):
         super().__init__()
         self.hub = hub
@@ -415,9 +417,32 @@ class SdkSource(Source):
             stream_id=stream_id,
         )
 
-    def shutdown(self):
+    def shutdown(self, timeout: float = 30.0):
+        """Disconnect and let queued SDK work finish before terminate(): terminating
+        during an in-flight disconnect crashed in native code (segfault on exit)."""
+        self._user_disconnect = True          # also cancels a connect / reconnect loop
         try:
             self.stop_scan()
+        except Exception as e:
+            print(f"[SdkSource] stop scan error: {e}")
+
+        def work():
+            sensor = self._sensor             # read when it runs (after queued work)
+            if sensor is None:
+                return
+            try:
+                if sensor.isDataTransfering:
+                    sensor.stopDataNotification()
+                if sensor.isReady:
+                    sensor.disconnect()
+            except Exception as e:
+                print(f"[SdkSource] disconnect on shutdown failed: {e}")
+        try:
+            # one FIFO runner thread: this also waits for SDK work already queued
+            self._sdk.submit(work).result(timeout)
+        except Exception as e:
+            print(f"[SdkSource] shutdown wait: {e}")
+        try:
             self._ctrl.terminate()
         except Exception as e:
             print(f"[SdkSource] terminate error: {e}")
@@ -441,13 +466,20 @@ class SimGenerator:
     """Deterministic synthetic 8-ch EMG + 6-axis IMU + impedance, block by block.
 
     Cycles through 'gestures' that each activate a different channel pattern.
+    Contact scenarios: "default" (CH6 marginal, CH8 loose, as before) or "good"
+    (all 8 channels <= 500 kOhm; simulation only, for exercising workflows that
+    require good contact).
     """
 
     IMU_RATE = 50
+    CONTACT_SCENARIOS = {
+        "default": (180, 220, 260, 300, 350, 700, 240, 1400),
+        "good": (180, 220, 260, 300, 350, 280, 240, 320),
+    }
 
     def __init__(self, seed=None, rate: int = DEFAULT_EMG_RATE,
                  package: int = PACKAGE_SAMPLE_COUNT, faults: Optional[SimFaults] = None,
-                 filters: Optional[dict] = None):
+                 filters: Optional[dict] = None, contact: str = "default"):
         self.rng = np.random.default_rng(seed)
         self.rate = rate
         self.package = package
@@ -456,7 +488,7 @@ class SimGenerator:
         fixed = np.random.default_rng(7)
         self._gestures = fixed.uniform(0.0, 1.0, (6, EMG_CHANNELS)) ** 3
         self._offsets = fixed.uniform(-150, 150, EMG_CHANNELS)
-        self._base_imp = np.array([180, 220, 260, 300, 350, 700, 240, 1400], float) * 1000
+        self._base_imp = np.array(self.CONTACT_SCENARIOS[contact], float) * 1000
         self.stream_id = 1
         self.restart()
 
@@ -541,13 +573,18 @@ class SimSource(Source):
     """
 
     ADDRESS = "SIM:00:00:00:00:00"
+    is_simulation = True
 
     def __init__(self, hub: DataHub, emg_rate: int = DEFAULT_EMG_RATE,
                  package_samples: int = PACKAGE_SAMPLE_COUNT, seed=None,
-                 faults: Optional[SimFaults] = None, reconnect_delay: float = 1.0):
+                 faults: Optional[SimFaults] = None, reconnect_delay: float = 1.0,
+                 contact: str = "default"):
         super().__init__(hub, emg_rate)
+        if contact not in SimGenerator.CONTACT_SCENARIOS:
+            raise ValueError(f"unknown simulated contact scenario {contact!r}")
         self._package = package_samples
         self._seed = seed
+        self.contact = contact
         self.faults = faults or SimFaults()
         self.reconnect_delay = reconnect_delay
         self._thread = None
@@ -584,7 +621,7 @@ class SimSource(Source):
         self.hub.reset()
         self._stream_id += 1
         self._gen = SimGenerator(self._seed, self.target_emg_rate, self._package,
-                                 self.faults, self._filters)
+                                 self.faults, self._filters, self.contact)
         self._gen.stream_id = self._stream_id
         self._stop.clear()
         self._drop.clear()
@@ -592,7 +629,9 @@ class SimSource(Source):
         self._thread.start()
         self._set_state(STREAMING)
         self.connected.emit({"name": "gForceUltra-SIM", "address": self.ADDRESS,
-                             "model": "gForceUltra (simulated)", "firmware": "-",
+                             "model": "gForceUltra (simulated)" if self.contact == "default"
+                             else f"gForceUltra (simulated, {self.contact} contact)",
+                             "firmware": "-",
                              "hardware": "-", "emg_channels": EMG_CHANNELS,
                              "imu_channels": IMU_CHANNELS, "mtu": 0,
                              "backend": "simulator", "package_samples": self._package})

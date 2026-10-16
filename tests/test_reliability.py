@@ -337,3 +337,60 @@ def test_stale_queued_state_signal_does_not_override_current_state(qapp, tmp_pat
         win.recorder.session.wait(5)
         src.disconnect_device()
         win.close()
+
+
+def test_sdk_shutdown_waits_for_disconnect_before_terminate(qapp):
+    """terminate() during an in-flight disconnect segfaulted on exit (seen on the band)."""
+    from concurrent.futures import ThreadPoolExecutor
+    import sensor as real
+    from gforce_emg_ui.sources import IDLE, SdkSource, STREAMING
+    order, runner = [], ThreadPoolExecutor(max_workers=1)    # FIFO like the SDK runner
+
+    class SlowSensor(_FakeSensor):
+        def disconnect(self):
+            time.sleep(0.2)
+            order.append("disconnect")
+            return super().disconnect()
+
+    class Controller:
+        isEnable, isScanning = True, False
+
+        def __init__(self):
+            self.on_sensor_scan_result = None
+
+        def requireSensor(self, device):
+            return sensor
+
+        def stopScan(self):
+            pass
+
+        def getBLEBackendName(self):
+            return "fake"
+
+        def terminate(self):
+            order.append("terminate")
+
+    sdk = SimpleNamespace(SensorController=Controller, submit=runner.submit,
+                          DataType=real.DataType, DeviceStateEx=real.DeviceStateEx)
+    sensor = SlowSensor(sdk)
+    src = SdkSource(DataHub(), sdk=sdk)
+    src._on_scan([SimpleNamespace(Name="gForceUltra", Address="AA:BB", RSSI=-50)])
+    src.connect_device("AA:BB")
+    assert wait_until(lambda: src.state == STREAMING, 5, qapp)
+    src.disconnect_device()                 # queued on the runner, still running ...
+    src.shutdown()                          # ... must not terminate underneath it
+    assert order == ["disconnect", "terminate"]
+    runner.shutdown()
+
+    order.clear()                           # closing while still connected
+    sensor = SlowSensor(sdk)
+    src = SdkSource(DataHub(), sdk=sdk)
+    src._on_scan([SimpleNamespace(Name="gForceUltra", Address="AA:BB", RSSI=-50)])
+    runner = ThreadPoolExecutor(max_workers=1)
+    sdk.submit = runner.submit
+    src.connect_device("AA:BB")
+    assert wait_until(lambda: src.state == STREAMING, 5, qapp)
+    src.shutdown()
+    assert order == ["disconnect", "terminate"] and "stop" in sensor.calls
+    assert wait_until(lambda: src.state == IDLE, 5, qapp)
+    runner.shutdown()
