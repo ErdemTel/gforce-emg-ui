@@ -11,6 +11,7 @@ import json
 import math
 import os
 import re
+import shutil
 import subprocess
 import uuid
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -79,6 +80,19 @@ def atomic_write_text(path: Path, text: str):
             os.close(fd)
     except OSError:
         pass
+
+
+def discard_attempt(root: Path, folder: Path, text: str):
+    """Delete a rejected attempt folder (inside root). trial.json is rewritten as
+    rejected first, so a delete that fails part-way never leaves it unreviewed."""
+    folder = ensure_within(root, folder)
+    if folder == Path(root).resolve():
+        raise ValueError(f"refusing to delete the output root {folder}")
+    try:
+        atomic_write_text(folder / "trial.json", text)
+    except OSError:
+        pass                              # deleting the folder below is what matters
+    shutil.rmtree(folder)
 
 
 def read_json(path: Path) -> Any:

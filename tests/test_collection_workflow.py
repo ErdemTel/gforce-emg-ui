@@ -17,6 +17,7 @@ import pytest
 
 from conftest import make_emg, wait_until
 from gforce_emg_ui.collection import controller as controller_mod
+from gforce_emg_ui.collection import storage as storage_mod
 from gforce_emg_ui.collection.controller import (IDLE, REVIEW, RUNNING, CollectionController,
                                                  TrialSpec)
 from gforce_emg_ui.collection.plan import attempt_category, training_candidate
@@ -231,27 +232,26 @@ def test_only_hold_is_selected_and_rest_is_never_labelled_low(sim):
     assert "low" not in json.dumps(d["training_candidate"])
 
 
-def test_repeat_creates_new_attempt_and_planned_trial_counts_once(sim):
+def test_repeat_deletes_attempt_and_planned_trial_counts_once(sim):
     r = sim
     make_plan(r)
     tid = r.c.planned_trial()["trial_id"]
     first = run_trial(r, plan_spec(r))
+    first_id = r.c.sidecar["attempt_id"]
     review(r, "repeat", ["hand_movement"])
+    assert not first.exists() and first_id not in r.c.records    # only accepted are kept
     assert r.c.planned_trial()["trial_id"] == tid             # same planned trial again
     assert r.c.selection["repeat"] is True
     second = run_trial(r, plan_spec(r))
-    assert second != first and first.exists() and second.exists()
-    d1, d2 = sidecar(first), sidecar(second)
-    assert d1["review"] == {**d1["review"], "status": "rejected", "decision": "repeat",
-                            "reasons": ["hand_movement"]}
-    assert d2["trial_id"] == d1["trial_id"] == tid
-    assert d2["attempt_number"] == 2 and d2["attempt_id"] != d1["attempt_id"]
-    assert f"_{tid}_a02_" in second.name
+    assert second != first and second.exists()
+    d2 = sidecar(second)
+    assert d2["trial_id"] == tid and d2["attempt_id"] != first_id
+    assert d2["attempt_number"] == 1 and f"_{tid}_a01_" in second.name
     review(r, "accept")
+    assert second.exists() and sidecar(second)["review"]["status"] == "accepted"
     p = r.c.progress
-    assert (p.accepted, p.attempted, p.rejected, p.remaining) == (1, 2, 1, 199)
+    assert (p.accepted, p.attempted, p.rejected, p.remaining) == (1, 1, 0, 199)
     assert p.completed == {tid: d2["attempt_id"]}
-    assert sidecar(first)["review"]["status"] == "rejected"   # never overwritten
     done = plan_spec(r)
     done.planned_trial = r.c.plan.trial(tid)
     done.object_id, done.target_label = (done.planned_trial["object_id"],
@@ -264,12 +264,21 @@ def test_reject_moves_on_and_rejected_trial_stays_pending(sim):
     r = sim
     make_plan(r)
     tid = r.c.planned_trial()["trial_id"]
-    run_trial(r, plan_spec(r))
+    folder = run_trial(r, plan_spec(r))
     review(r, "reject", ["wrong_effort"])
+    assert not folder.exists()
     assert r.c.planned_trial()["trial_id"] != tid              # moves on, comes back later
+    assert r.c.message == "Rejected – deleted"
     p = r.c.progress
-    assert (p.accepted, p.rejected, p.remaining) == (0, 1, 200)
+    assert (p.accepted, p.attempted, p.rejected, p.remaining) == (0, 0, 0, 200)
     assert tid not in p.completed
+    # consecutive rejects keep drawing new trials (the attempt count on disk does not change)
+    keys = {r.c.selection["key"]}
+    for _ in range(2):
+        run_trial(r, plan_spec(r))
+        review(r, "reject")
+        keys.add(r.c.selection["key"])
+    assert keys == {"0/d1", "0/d2", "0/d3"}
 
 
 def test_flagged_hold_requires_repeat(qapp, tmp_path):
@@ -286,6 +295,7 @@ def test_flagged_hold_requires_repeat(qapp, tmp_path):
         lost = [row for row in rows(folder / "emg.csv") if row["lost"] == "1"]
         assert lost and all(row["ch1"] == "" for row in lost)          # kept, not filled
         review(r, "repeat", ["contact_problem"])
+        assert not folder.exists()
     finally:
         close_rig(r)
 
@@ -315,6 +325,7 @@ def test_link_loss_aborts_keeps_partial_data_and_readiness_restarts(qapp, tmp_pa
         # after the reconnect the next attempt must pass readiness again
         assert drive(r.c, lambda: r.src.state == STREAMING and r.hub.emg_segment == 2, r.app)
         review(r, "reject", ["other"])
+        assert not folder.exists()                            # aborted attempts are deleted
         r.c.tick()
         assert not r.c.readiness.ready
         assert drive(r.c, lambda: r.c.readiness.ready, r.app)
@@ -440,7 +451,7 @@ def test_metadata_write_failure_is_never_reported_as_saved(sim, monkeypatch):
     assert r.c.sidecar["attempt_id"] not in r.c.records
 
 
-def test_final_metadata_failure_leaves_attempt_invalid_on_disk(sim, monkeypatch):
+def test_final_metadata_failure_leaves_attempt_invalid_until_rejected(sim, monkeypatch):
     r = sim
     real = controller_mod.atomic_write_text
 
@@ -454,8 +465,34 @@ def test_final_metadata_failure_leaves_attempt_invalid_on_disk(sim, monkeypatch)
     assert not r.c.metadata_ok and not r.c.acceptable
     d = sidecar(folder)
     assert d["status"] == "recording" and attempt_category(d) == "invalid"
+    assert r.c.progress.invalid == 1
     review(r, "reject", ["other"])
-    assert r.c.progress.accepted == 0 and r.c.progress.invalid == 1
+    assert not folder.exists()
+    assert r.c.progress.accepted == 0 and r.c.progress.invalid == 0
+
+
+def test_failed_delete_keeps_a_rejected_attempt_and_moves_on(sim, monkeypatch):
+    r = sim
+
+    def failing(path):
+        raise OSError("injected")
+    monkeypatch.setattr(storage_mod.shutil, "rmtree", failing)
+    folder = run_trial(r, manual_spec(r))
+    review(r, "reject", ["other"])
+    assert "could not delete" in r.c.error and "injected" in r.c.error
+    d = sidecar(folder)
+    assert d["review"]["status"] == "rejected" and attempt_category(d) == "rejected"
+    assert r.c.records[d["attempt_id"]]["review"]["status"] == "rejected"
+
+
+def test_delete_never_leaves_the_output_root(tmp_path):
+    root = tmp_path / "root"
+    (root / "P01").mkdir(parents=True)
+    with pytest.raises(ValueError):
+        storage_mod.discard_attempt(root, tmp_path, "{}")
+    with pytest.raises(ValueError):
+        storage_mod.discard_attempt(root, root, "{}")
+    assert (root / "P01").exists()
 
 
 def test_crash_leaves_interrupted_attempt_that_never_counts(sim):
@@ -518,7 +555,7 @@ def test_attempt_folders_are_unique_and_never_overwritten(sim):
     folders = []
     for _ in range(2):
         folders.append(run_trial(r, manual_spec(r)))
-        review(r, "repeat", ["other"])
+        review(r, "accept")
     assert folders[0] != folders[1] and all(f.exists() for f in folders)
     ids = {sidecar(f)["attempt_id"] for f in folders}
     assert len(ids) == 2
@@ -653,7 +690,7 @@ def test_manual_stop_and_disconnect_abort_the_trial(qapp, tmp_path, how, reason)
         win.close()
 
 
-def test_app_close_during_trial_finalizes_before_closing(qapp, tmp_path):
+def test_app_close_during_trial_finalizes_then_deletes_the_attempt(qapp, tmp_path):
     win, src, panel = make_window(qapp, tmp_path)
     win.show()
     start_panel_trial(qapp, win, panel)
@@ -662,9 +699,23 @@ def test_app_close_during_trial_finalizes_before_closing(qapp, tmp_path):
     win.close()                                               # ignored until finalized
     assert win.isVisible()
     assert wait_until(lambda: not win.isVisible(), 10, qapp)
-    d = sidecar(folder)
-    assert d["outcome"]["abort_reason"] == "app_close" and d["status"] == "finalized"
-    assert d["outcome"]["recorder"] == "saved"
+    sc = c.sidecar
+    assert sc["outcome"]["abort_reason"] == "app_close" and sc["outcome"]["recorder"] == "saved"
+    assert sc["review"]["status"] == "rejected" and not folder.exists()
+    src.disconnect_device()
+
+
+def test_app_close_before_review_deletes_the_attempt(qapp, tmp_path):
+    win, src, panel = make_window(qapp, tmp_path)
+    win.show()
+    start_panel_trial(qapp, win, panel)
+    c = win.collection
+    folder = c.session.folder
+    assert wait_until(lambda: c.state == REVIEW, 10, qapp)
+    assert c.sidecar["outcome"]["protocol"] == "completed" and folder.exists()
+    win.close()                                               # waits for the delete
+    assert wait_until(lambda: not win.isVisible(), 10, qapp)
+    assert not folder.exists()
     src.disconnect_device()
 
 

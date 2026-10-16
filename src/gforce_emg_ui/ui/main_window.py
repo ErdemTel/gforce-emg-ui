@@ -7,6 +7,7 @@ import numpy as np
 from PyQt5 import QtCore, QtGui, QtWidgets
 
 from .. import __version__
+from ..collection.controller import REVIEW
 from ..config import (EMG_CHANNELS, EMG_RATES, FILTERS, PLOT_INTERVAL_MS,
                       STATUS_INTERVAL_MS)
 from ..contact import LEVEL_COLORS, contact_color, format_kohm
@@ -508,6 +509,8 @@ class MainWindow(QtWidgets.QMainWindow):
         return f"⚠ {errs} subscriber errors · " if errs else ""
 
     def closeEvent(self, event):
+        if self.collection.state == REVIEW:   # not accepted: deleted like a rejected attempt
+            self.collection.submit_review("reject", comment="app closed before review")
         if self.recorder.busy or self.collection.busy:
             # Never block the event loop on the writer: stop, keep the window
             # until the status timer sees the session (and trial.json) finish, then close.

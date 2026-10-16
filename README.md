@@ -150,7 +150,7 @@ the band), all 8 channels delivering, no red contact (green and orange OK; inval
 form valid, recorder free. EMG amplitude is never checked. The SDK gives no impedance
 timestamp, so freshness comes from EMG batches.
 
-**Aborts** (partial data kept, reason saved, no resume): link loss, stale stream, segment
+**Aborts** (no resume; cannot be accepted): link loss, stale stream, segment
 reset, recorder or trial.json error, phase overrun > 1 s, manual Stop, Disconnect, closing
 the app. Red/unknown contact, lost/invalid samples and gaps during HOLD flag it; flagged HOLDs
 cannot be accepted.
@@ -167,7 +167,9 @@ Older plan files without movement are used unchanged; their trials are recorded 
 Tick the objects you have under *Available objects*: the next trial is drawn at random from
 the remaining planned trials for those objects, plus empty hand until its trials are done
 (no target three times in a row; reproducible from the plan seed). Accept counts a planned
-trial once; Reject moves on (trial comes back later); Repeat retries now. Every attempt is a new folder. Progress is recomputed from `trial.json` files.
+trial once; Reject moves on (trial comes back later); Repeat retries now. Only accepted
+attempts are kept: Reject, Repeat or closing the app before review deletes the attempt
+folder. Every attempt is a new folder. Progress is recomputed from `trial.json` files.
 *Mode → Manual* is for practice / held-out tests (never counted).
 
 ```

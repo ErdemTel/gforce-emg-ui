@@ -13,6 +13,8 @@ is written atomically on the I/O thread: at start (identity, status
 "recording"), after the recorder finished ("finalized"), and after review
 ("reviewed"). An attempt is shown as saved only when the recorder reported
 SAVED and trial.json was written. Progress is recomputed from trial.json files.
+Only accepted attempts are kept: Reject / Repeat (and closing the app before
+review) delete the attempt folder, aborted or not.
 """
 
 import json
@@ -36,8 +38,8 @@ from .protocol import (DONE, HOLD, LABEL_SEMANTICS, MOTIONS, OPERATOR_NOTES, PHA
                        TrialStateMachine, motion_info, participant_instructions, target_info)
 from .readiness import (Readiness, ReadinessMonitor, StreamTracker, contact_events,
                         summarize_window)
-from .storage import (IoWorker, atomic_write_text, attempt_name, dumps, ensure_within,
-                      git_info, valid_id, valid_key)
+from .storage import (IoWorker, atomic_write_text, attempt_name, discard_attempt, dumps,
+                      ensure_within, git_info, valid_id, valid_key)
 
 IDLE, RUNNING, FINALIZING, REVIEW, SAVING_REVIEW = (
     "idle", "running", "finalizing", "review", "saving_review")
@@ -196,6 +198,7 @@ class CollectionController:
         self.available_objects: Optional[set] = None   # None = all plan objects
         self.selection: Optional[dict] = None          # how plan_cursor was chosen
         self._exclude: Optional[int] = None            # just-rejected trial, not re-picked at once
+        self._discarded = 0                            # deleted attempts since the last accept
         self.progress: Optional[Progress] = None
         self.version = 0                         # bumps when records / plan / progress change
         self.objects = merge_objects(None)
@@ -265,7 +268,7 @@ class CollectionController:
             return
         self.plan = next((p for p in self.plans if p.plan_id == plan_id), None)
         self._recompute()
-        self._exclude = None
+        self._exclude, self._discarded = None, 0
         self._pick_next()
 
     def available(self) -> set:
@@ -295,6 +298,8 @@ class CollectionController:
             return
         avail, recent = self.available(), self._recent_targets()
         key = str(self.progress.attempted)             # new draw after every attempt
+        if self._discarded:                            # deleted attempts are not on disk
+            key += f"/d{self._discarded}"
         self.plan_cursor = pick_trial(self.plan, self.progress, avail, recent, key,
                                       self._exclude)
         self.selection = {"rule": SELECTION_RULE, "available_objects": sorted(avail),
@@ -628,7 +633,12 @@ class CollectionController:
         sc["status"] = "reviewed"
         self.last_decision = decision
         self.state = SAVING_REVIEW
-        self._write_sidecar("review")
+        if decision == "accept":
+            self._write_sidecar("review")
+        else:                                 # only accepted attempts are kept
+            text = dumps(sc)
+            fut = self.io.submit(discard_attempt, self.spec.output_root, self.session.folder, text)
+            self._writes.append((fut, "discard", text))
         return True
 
     # -- I/O ---------------------------------------------------------------------------
@@ -656,6 +666,8 @@ class CollectionController:
                 self._final_written(err, text)
             elif kind == "review":
                 self._review_written(err, text)
+            elif kind == "discard":
+                self._attempt_discarded(err, text)
             self._recompute()
         if self._scan is not None and self._scan[0].done():
             fut, proot = self._scan
@@ -707,7 +719,7 @@ class CollectionController:
             self.message = f"Saved {self.session.folder.name} · HOLD quality {q}"
         elif self.metadata_ok:
             self.message = (f"Aborted ({ABORT_REASONS.get(out['abort_reason'], out['abort_reason'])})"
-                            f" – partial data saved in {self.session.folder.name}. Not counted.")
+                            f" – not counted; Reject / Repeat deletes it.")
         self.state = REVIEW
 
     def _review_written(self, err: Optional[str], text: str):
@@ -718,7 +730,21 @@ class CollectionController:
             self.state = REVIEW
             return
         self._upsert(text)
+        self._reviewed()
+
+    def _attempt_discarded(self, err: Optional[str], text: str):
+        folder = self.session.folder
+        if err:
+            self._upsert(text)                # left on disk, marked rejected
+        else:
+            self.records.pop(self.sidecar["attempt_id"], None)
+        self._reviewed()
+        if err:
+            self.error = f"ERROR: could not delete {folder} ({err}); delete it by hand."
+
+    def _reviewed(self):
         decision = self.last_decision
+        self._discarded = 0 if decision == "accept" else self._discarded + 1
         self.reviews_saved += 1
         self.state = IDLE
         self.session = None
@@ -732,8 +758,8 @@ class CollectionController:
             else:
                 self._exclude = cur if decision == "reject" else None
                 self._pick_next()
-        self.message = {"accept": "Accepted", "reject": "Rejected",
-                        "repeat": "Rejected – repeat the same trial"}[decision]
+        self.message = {"accept": "Accepted", "reject": "Rejected – deleted",
+                        "repeat": "Rejected – deleted; repeat the same trial"}[decision]
 
     # -- sidecar ---------------------------------------------------------------------
     def _new_sidecar(self, spec: TrialSpec, attempt_id: str, number: int, session,

@@ -219,14 +219,15 @@ def test_plan_trial_uses_the_planned_motion(sim):
     assert sidecar(folder)["condition"]["motion_condition"] == planned
 
 
-def test_new_review_reasons_are_saved(sim):
+def test_new_review_reasons_are_recorded(sim):
     r = sim
     for key in ("incorrect_movement", "grasp_change", "effort_not_maintained"):
         assert key in REVIEW_REASONS
     folder = run_trial(r, manual_spec(r, motion_condition="reach_sweep"))
     reasons = ["incorrect_movement", "grasp_change", "effort_not_maintained"]
     review(r, "repeat", reasons)
-    assert sidecar(folder)["review"]["reasons"] == reasons
+    assert r.c.sidecar["review"]["reasons"] == reasons
+    assert not folder.exists()                              # rejected attempts are deleted
     run_trial(r, manual_spec(r, motion_condition="reach_sweep"))
     with pytest.raises(ValueError):
         r.c.submit_review("reject", ["moved_too_much"])

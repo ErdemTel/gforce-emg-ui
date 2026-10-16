@@ -312,6 +312,8 @@ class StiffnessCollectionPanel(QtWidgets.QWidget):
         self.btn_accept = QtWidgets.QPushButton("Accept")
         self.btn_reject = QtWidgets.QPushButton("Reject")
         self.btn_repeat = QtWidgets.QPushButton("Repeat")
+        self.btn_reject.setToolTip("Delete this attempt; the trial comes back later")
+        self.btn_repeat.setToolTip("Delete this attempt and retry the same trial now")
         for b in (self.btn_accept, self.btn_reject, self.btn_repeat):
             row.addWidget(b)
         rv.addLayout(row)
@@ -695,7 +697,7 @@ class StiffnessCollectionPanel(QtWidgets.QWidget):
                 big, color, fg = "ABORTED – partial data", PHASE_COLORS[ABORTED], "white"
             else:
                 big = "SAVED – review"
-            instr = "Release and rest. Review the attempt: Accept, Reject or Repeat."
+            instr = "Release and rest. Accept keeps the attempt; Reject / Repeat delete it."
             times = f"recorded {m.elapsed():.1f} s" if m else ""
             summary = "<b>Stiffness trial awaiting review</b>"
         else:
