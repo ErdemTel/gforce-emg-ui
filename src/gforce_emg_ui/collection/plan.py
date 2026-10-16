@@ -348,16 +348,36 @@ def compute_progress(plan: TrialPlan, records: Dict[str, dict], live: Iterable[s
     return pr
 
 
-def next_incomplete(plan: TrialPlan, progress: Progress, after: Optional[int] = None) -> Optional[int]:
-    """0-based index of the next planned trial not yet completed, searching
-    forward from after+1 and wrapping around (after=None: from the start)."""
-    n = plan.total
-    start = 0 if after is None else after + 1
-    for k in range(n):
-        i = (start + k) % n
-        if plan.trials[i]["trial_id"] not in progress.completed:
-            return i
-    return None
+SELECTION_RULE = "random-available/no-target-run-over-2/v1"
+
+
+def eligible_trials(plan: TrialPlan, progress: Progress, available: Iterable[str]) -> List[int]:
+    """Indices of incomplete planned trials whose object is available. Empty hand
+    needs no object: it is always eligible until its planned trials are complete."""
+    avail = set(available) | {EMPTY_HAND}
+    return [i for i, t in enumerate(plan.trials)
+            if t["trial_id"] not in progress.completed and t["object_id"] in avail]
+
+
+def pick_trial(plan: TrialPlan, progress: Progress, available: Iterable[str],
+               recent_targets: Iterable[str] = (), key: str = "",
+               exclude: Optional[int] = None, max_run: int = MAX_TARGET_RUN) -> Optional[int]:
+    """Random next planned trial (index) among the eligible ones, or None.
+
+    Deterministic for (plan seed, key, eligible set): re-ticking the same objects
+    gives the same pick, so toggling cannot re-roll it. Avoids more than max_run
+    identical targets in a row (recent_targets = last attempts) and the excluded
+    index (a just-rejected trial) whenever another choice exists.
+    """
+    idx = eligible_trials(plan, progress, available)
+    if exclude is not None and len(idx) > 1:
+        idx = [i for i in idx if i != exclude]
+    if not idx:
+        return None
+    tail = list(recent_targets)[-max_run:]
+    banned = tail[0] if len(tail) == max_run and len(set(tail)) == 1 else None
+    pool = [i for i in idx if plan.trials[i]["target_label"] != banned] or idx
+    return random.Random(f"{plan.seed}:{key}").choice(pool)
 
 
 def training_candidate(rec: dict, require_accepted: bool = True) -> Optional[dict]:

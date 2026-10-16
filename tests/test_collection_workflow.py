@@ -130,7 +130,8 @@ def test_simulated_end_to_end_trial(sim):
     r = sim
     make_plan(r)
     planned = r.c.planned_trial()
-    assert planned["trial_id"] == "t001"
+    tid = planned["trial_id"]
+    assert r.c.selection["eligible"] == 200                    # all objects ticked by default
     folder = run_trial(r, plan_spec(r))
     c = r.c
     assert c.metadata_ok and c.message.startswith("Saved") and not c.error
@@ -140,7 +141,7 @@ def test_simulated_end_to_end_trial(sim):
     assert not (r.root / "P01").exists()                    # nothing saved as real data
     s = {"low": "s0p0", "medium": "s0p5", "high": "s1p0"}[planned["target_label"]]
     assert re.fullmatch(rf"\d{{8}}_\d{{6}}_{planned['object_id']}_{planned['target_label']}_"
-                        rf"{s}_t001_a01_[0-9a-f]{{8}}", folder.name)
+                        rf"{s}_{tid}_a01_[0-9a-f]{{8}}", folder.name)
     assert {p.name for p in folder.iterdir()} == {"emg.csv", "imu.csv", "contact.csv",
                                                  "markers.csv", "session.json", "trial.json"}
     for name in ("emg", "imu", "contact", "markers"):        # raw schemas unchanged
@@ -159,7 +160,9 @@ def test_simulated_end_to_end_trial(sim):
     assert d["schema"] == "gforce_emg_ui.stiffness_trial" and d["schema_version"] == 2
     assert d["status"] == "finalized" and d["review"]["status"] == "pending"
     assert d["is_simulation"] is True and d["data_source"] == "simulation"
-    assert d["plan_id"] == c.plan.plan_id and d["trial_id"] == "t001"
+    assert d["plan_id"] == c.plan.plan_id and d["trial_id"] == tid
+    assert d["selection"]["rule"].startswith("random-available")
+    assert d["selection"]["available_objects"] == ["obj01", "obj02", "obj03", "obj04", "obj05"]
     assert d["attempt_number"] == 1 and d["attempt_id"] in folder.name
     assert d["participant_id"] == "P01" and d["collection_session_id"] == "S01"
     assert d["dataset_role"] == "development"
@@ -198,7 +201,8 @@ def test_simulated_end_to_end_trial(sim):
     d = sidecar(folder)
     assert d["status"] == "reviewed" and d["review"]["status"] == "accepted"
     assert c.progress.accepted == 1 and c.progress.remaining == 199
-    assert c.planned_trial()["trial_id"] == "t002"
+    nxt = c.planned_trial()["trial_id"]
+    assert nxt != tid and nxt not in c.progress.completed
 
 
 def test_only_hold_is_selected_and_rest_is_never_labelled_low(sim):
@@ -230,24 +234,26 @@ def test_only_hold_is_selected_and_rest_is_never_labelled_low(sim):
 def test_repeat_creates_new_attempt_and_planned_trial_counts_once(sim):
     r = sim
     make_plan(r)
+    tid = r.c.planned_trial()["trial_id"]
     first = run_trial(r, plan_spec(r))
     review(r, "repeat", ["hand_movement"])
-    assert r.c.planned_trial()["trial_id"] == "t001"          # same planned trial again
+    assert r.c.planned_trial()["trial_id"] == tid             # same planned trial again
+    assert r.c.selection["repeat"] is True
     second = run_trial(r, plan_spec(r))
     assert second != first and first.exists() and second.exists()
     d1, d2 = sidecar(first), sidecar(second)
     assert d1["review"] == {**d1["review"], "status": "rejected", "decision": "repeat",
                             "reasons": ["hand_movement"]}
-    assert d2["trial_id"] == d1["trial_id"] == "t001"
+    assert d2["trial_id"] == d1["trial_id"] == tid
     assert d2["attempt_number"] == 2 and d2["attempt_id"] != d1["attempt_id"]
-    assert "_t001_a02_" in second.name
+    assert f"_{tid}_a02_" in second.name
     review(r, "accept")
     p = r.c.progress
     assert (p.accepted, p.attempted, p.rejected, p.remaining) == (1, 2, 1, 199)
-    assert p.completed == {"t001": d2["attempt_id"]}
+    assert p.completed == {tid: d2["attempt_id"]}
     assert sidecar(first)["review"]["status"] == "rejected"   # never overwritten
     done = plan_spec(r)
-    done.planned_trial = r.c.plan.trials[0]
+    done.planned_trial = r.c.plan.trial(tid)
     done.object_id, done.target_label = (done.planned_trial["object_id"],
                                          done.planned_trial["target_label"])
     done.motion_condition = done.planned_trial["motion_condition"]
@@ -257,12 +263,13 @@ def test_repeat_creates_new_attempt_and_planned_trial_counts_once(sim):
 def test_reject_moves_on_and_rejected_trial_stays_pending(sim):
     r = sim
     make_plan(r)
+    tid = r.c.planned_trial()["trial_id"]
     run_trial(r, plan_spec(r))
     review(r, "reject", ["wrong_effort"])
-    assert r.c.planned_trial()["trial_id"] == "t002"
+    assert r.c.planned_trial()["trial_id"] != tid              # moves on, comes back later
     p = r.c.progress
     assert (p.accepted, p.rejected, p.remaining) == (0, 1, 200)
-    assert "t001" not in p.completed
+    assert tid not in p.completed
 
 
 def test_flagged_hold_requires_repeat(qapp, tmp_path):
@@ -474,18 +481,21 @@ def test_resume_plan_across_sessions_from_disk(sim):
     r = sim
     make_plan(r, seed=21)
     plan_id, order = r.c.plan.plan_id, [dict(t) for t in r.c.plan.trials]
+    first = r.c.planned_trial()["trial_id"]
     run_trial(r, plan_spec(r, "S01"))
     review(r, "accept")
+    expected_next = r.c.planned_trial()["trial_id"]
     c2 = CollectionController(r.hub, r.rec, r.src, settings=ProtocolSettings(**FAST))
     c2.open_participant(r.root, "P01")
     assert drive(c2, lambda: not c2.loading and c2.plan is not None, r.app)
     assert c2.plan.plan_id == plan_id and c2.plan.trials == order       # not reshuffled
-    assert c2.progress.accepted == 1 and c2.planned_trial()["trial_id"] == "t002"
+    # same next trial after a restart: the pick depends only on what is on disk
+    assert c2.progress.accepted == 1 and c2.planned_trial()["trial_id"] == expected_next
     r2 = SimpleNamespace(**{**vars(r), "c": c2})
     folder = run_trial(r2, plan_spec(r2, "S02"))
     review(r2, "accept")
     assert folder.parent.name == "S02" and sidecar(folder)["collection_session_id"] == "S02"
-    assert c2.progress.accepted == 2 and set(c2.progress.completed) == {"t001", "t002"}
+    assert c2.progress.accepted == 2 and set(c2.progress.completed) == {first, expected_next}
     plans = list((r.root / "simulated" / "P01").glob("plan_*.json"))
     assert len(plans) == 1
     c2.io.shutdown()
@@ -771,3 +781,62 @@ def test_contact_chips_restyle_only_on_change(qapp):
     finally:
         qapp.removeEventFilter(spy)
         strip.close()
+
+
+def test_next_trial_is_random_among_available_objects_plus_empty_hand(sim):
+    r = sim
+    make_plan(r, seed=8)
+    c = r.c
+    assert c.set_available_objects({"obj02"})
+    seen = set()
+    for _ in range(3):
+        t = c.planned_trial()
+        assert t["object_id"] in {"obj02", "empty_hand"}
+        assert c.selection["eligible"] == 32 + 40 - c.progress.accepted
+        seen.add(t["trial_id"])
+        folder = run_trial(r, plan_spec(r))
+        d = sidecar(folder)
+        assert d["selection"]["available_objects"] == ["obj02"]
+        assert d["selection"]["empty_hand_always_eligible"] is True
+        review(r, "accept")
+    assert len(seen) == 3 and c.progress.accepted == 3
+    # re-ticking the same objects gives the same pick: toggling cannot re-roll it
+    c.set_available_objects({"obj01"})
+    a = c.planned_trial()["trial_id"]
+    c.set_available_objects({"obj01", "obj05"})
+    c.set_available_objects({"obj01"})
+    assert c.planned_trial()["trial_id"] == a
+    # a planned trial whose object is not ticked cannot start
+    other = next(t for t in c.plan.trials if t["object_id"] == "obj04"
+                 and t["trial_id"] not in c.progress.completed)
+    spec = plan_spec(r)
+    spec.planned_trial, spec.object_id = other, "obj04"
+    spec.target_label, spec.motion_condition = other["target_label"], other["motion_condition"]
+    assert "obj04 is not marked available" in c.start_blockers(spec)
+    start(r, plan_spec(r))
+    assert c.set_available_objects({"obj03"}) is False              # locked during a trial
+
+
+def test_available_object_checkboxes_in_the_panel(qapp, tmp_path):
+    win, src, panel = make_window(qapp, tmp_path)
+    try:
+        c = win.collection
+        assert list(panel.avail_checks) == ["obj01", "obj02", "obj03", "obj04", "obj05"]
+        assert all(cb.isChecked() for cb in panel.avail_checks.values())
+        assert panel.avail_row.isHidden()                       # manual mode: not shown
+        panel.mode_combo.setCurrentIndex(0)
+        assert not panel.avail_row.isHidden()
+        panel._new_plan(confirm=False)
+        assert wait_until(lambda: c.plan is not None, 5, qapp)
+        for cb in panel.avail_checks.values():
+            cb.setChecked(False)                                # nothing available today
+        panel.tick()
+        assert c.planned_trial()["object_id"] == "empty_hand"    # empty hand still offered
+        assert "random pick of 40 eligible" in panel.next_label.text()
+        panel.avail_checks["obj03"].setChecked(True)
+        panel.tick()
+        assert c.planned_trial()["object_id"] in {"obj03", "empty_hand"}
+        assert c.selection["eligible"] == 72
+    finally:
+        src.disconnect_device()
+        win.close()

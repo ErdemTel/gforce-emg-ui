@@ -26,9 +26,10 @@ from .. import __version__
 from ..config import EMG_CHANNELS, IMU_LABELS
 from ..recorder import ERROR, SAVED
 from ..sources import RECONNECTING, STREAMING
-from .plan import (EMPTY_HAND, OBJECTS_FILE, Progress, TrialPlan, attempt_category,
-                   compute_progress, load_objects, merge_objects, next_incomplete, objects_doc,
-                   participant_root, scan_participant)
+from .plan import (EMPTY_HAND, MAX_TARGET_RUN, OBJECTS_FILE, SELECTION_RULE, Progress,
+                   TrialPlan, attempt_category, compute_progress, eligible_trials,
+                   load_objects, merge_objects, objects_doc, participant_root, pick_trial,
+                   scan_participant)
 from .protocol import (DONE, HOLD, LABEL_SEMANTICS, MOTIONS, OPERATOR_NOTES, PHASES,
                        PROTOCOL_VERSION, SCHEMA_VERSION, STATIONARY, TARGET_INSTRUCTIONS, TARGETS,
                        TRAINING_CANDIDATE_PHASE, ProtocolEvent, ProtocolSettings,
@@ -192,6 +193,9 @@ class CollectionController:
         self.plans: List[TrialPlan] = []
         self.plan: Optional[TrialPlan] = None
         self.plan_cursor: Optional[int] = None
+        self.available_objects: Optional[set] = None   # None = all plan objects
+        self.selection: Optional[dict] = None          # how plan_cursor was chosen
+        self._exclude: Optional[int] = None            # just-rejected trial, not re-picked at once
         self.progress: Optional[Progress] = None
         self.version = 0                         # bumps when records / plan / progress change
         self.objects = merge_objects(None)
@@ -261,7 +265,42 @@ class CollectionController:
             return
         self.plan = next((p for p in self.plans if p.plan_id == plan_id), None)
         self._recompute()
-        self.plan_cursor = next_incomplete(self.plan, self.progress) if self.plan else None
+        self._exclude = None
+        self._pick_next()
+
+    def available(self) -> set:
+        """Objects available now (empty hand is always added by the selection)."""
+        if self.plan is None:
+            return set()
+        objs = set(self.plan.counts) - {EMPTY_HAND}
+        return objs if self.available_objects is None else objs & set(self.available_objects)
+
+    def set_available_objects(self, objects) -> bool:
+        if self.state != IDLE:
+            return False
+        self.available_objects = set(objects)
+        self._pick_next()
+        self.version += 1
+        return True
+
+    def _recent_targets(self) -> List[str]:
+        mine = sorted((r for r in self.records.values() if r.get("plan_id") == self.plan.plan_id),
+                      key=lambda r: ((r.get("timing") or {}).get("start") or {}).get("host_time") or 0)
+        return [(r.get("label") or {}).get("target_label") for r in mine][-MAX_TARGET_RUN:]
+
+    def _pick_next(self):
+        """Random next planned trial among the available objects (+ empty hand)."""
+        if self.plan is None or self.progress is None:
+            self.plan_cursor, self.selection = None, None
+            return
+        avail, recent = self.available(), self._recent_targets()
+        key = str(self.progress.attempted)             # new draw after every attempt
+        self.plan_cursor = pick_trial(self.plan, self.progress, avail, recent, key,
+                                      self._exclude)
+        self.selection = {"rule": SELECTION_RULE, "available_objects": sorted(avail),
+                          "empty_hand_always_eligible": True,
+                          "eligible": len(eligible_trials(self.plan, self.progress, avail)),
+                          "recent_targets": recent, "key": key, "excluded_index": self._exclude}
 
     def create_plan(self, seed: Optional[int] = None) -> Optional[TrialPlan]:
         """Generate a plan; it is usable only after its file was written."""
@@ -348,6 +387,8 @@ class CollectionController:
                 b.append("No saved plan selected")
             elif self.progress and spec.trial_id in self.progress.completed:
                 b.append(f"Planned trial {spec.trial_id} is already completed")
+            elif spec.object_id not in self.available() | {EMPTY_HAND}:
+                b.append(f"{spec.object_id} is not marked available")
         r = self.readiness or self.evaluate()
         if not r.ready:
             b += r.blockers
@@ -686,9 +727,11 @@ class CollectionController:
         if self.spec.planned_trial is not None and self.plan is not None and self.progress:
             cur = self.plan_cursor
             if decision == "repeat" and self.spec.trial_id not in self.progress.completed:
-                self.plan_cursor = cur
+                self.plan_cursor = cur                  # explicit retry of the same trial
+                self.selection = {**(self.selection or {}), "repeat": True}
             else:
-                self.plan_cursor = next_incomplete(self.plan, self.progress, cur)
+                self._exclude = cur if decision == "reject" else None
+                self._pick_next()
         self.message = {"accept": "Accepted", "reject": "Rejected",
                         "repeat": "Rejected – repeat the same trial"}[decision]
 
@@ -707,6 +750,7 @@ class CollectionController:
             "attempt_id": attempt_id, "attempt_number": number, "trial_id": spec.trial_id,
             "plan_id": spec.plan_id,
             "planned_trial_index": spec.planned_trial["index"] if spec.planned_trial else None,
+            "selection": dict(self.selection) if spec.planned_trial and self.selection else None,
             "participant_id": spec.participant_id, "collection_session_id": spec.session_id,
             "dataset_role": spec.dataset_role, "data_source": self.data_source,
             "is_simulation": self.is_simulation,

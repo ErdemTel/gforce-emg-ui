@@ -7,9 +7,10 @@ import json
 import pytest
 
 from gforce_emg_ui.collection.plan import (DEFAULT_PLAN_COUNTS, EMPTY_HAND, TrialPlan,
+                                           eligible_trials,
                                            attempt_category, compute_progress,
                                            counts_toward_plan, generate_order, max_target_run,
-                                           merge_objects, next_incomplete, participant_root,
+                                           merge_objects, participant_root, pick_trial,
                                            scan_participant, target_counts, training_candidate)
 from gforce_emg_ui.collection.storage import (atomic_write_text, attempt_name, dumps,
                                               ensure_within, jsonable, s_tag, valid_id)
@@ -140,16 +141,47 @@ def test_live_attempt_is_in_progress_not_interrupted():
     assert compute_progress(plan, {"live": r}, live={"live"}).in_progress == 1
 
 
-def test_next_incomplete_wraps_and_skips_completed():
+def test_only_available_objects_and_empty_hand_are_eligible():
     plan = TrialPlan.create("P01", "real", seed=1)
+    p = compute_progress(plan, {})
+    idx = eligible_trials(plan, p, {"obj02"})
+    assert {plan.trials[i]["object_id"] for i in idx} == {"obj02", EMPTY_HAND}
+    assert len(idx) == 32 + 40
+    assert {plan.trials[i]["object_id"] for i in eligible_trials(plan, p, set())} == {EMPTY_HAND}
+    empty = [t["trial_id"] for t in plan.trials if t["object_id"] == EMPTY_HAND]
+    done = {f"a{k}": rec(plan, tid, f"a{k}") for k, tid in enumerate(empty)}
+    p_done = compute_progress(plan, done)                 # empty hand complete: drops out
+    assert eligible_trials(plan, p_done, set()) == []
+    assert pick_trial(plan, p_done, set()) is None
+    assert {plan.trials[i]["object_id"] for i in eligible_trials(plan, p_done, {"obj05"})} == {"obj05"}
+
+
+def test_pick_is_random_reproducible_and_limited_to_available():
+    plan = TrialPlan.create("P01", "real", seed=3)
+    p = compute_progress(plan, {})
+    picks = [pick_trial(plan, p, {"obj01", "obj04"}, key=str(k)) for k in range(60)]
+    assert {plan.trials[i]["object_id"] for i in picks} == {"obj01", "obj04", EMPTY_HAND}
+    assert len(set(picks)) > 30                                    # spread, not plan order
+    assert picks == [pick_trial(plan, p, {"obj01", "obj04"}, key=str(k)) for k in range(60)]
+    first_incomplete = 0
+    assert sum(i == first_incomplete for i in picks) < 5
+
+
+def test_pick_avoids_a_third_identical_target_and_the_rejected_trial():
+    plan = TrialPlan.create("P01", "real", seed=3)
+    p = compute_progress(plan, {})
+    for k in range(50):
+        i = pick_trial(plan, p, {"obj01", "obj02"}, recent_targets=["high", "high"], key=str(k))
+        assert plan.trials[i]["target_label"] != "high"
+        j = pick_trial(plan, p, {"obj01", "obj02"}, key=str(k), exclude=i)
+        assert j != i
+    # only one eligible trial left: it is picked even if excluded or a third in a row
     ids = [t["trial_id"] for t in plan.trials]
-    records = {f"a{i}": rec(plan, ids[i], f"a{i}") for i in (0, 1, 199)}
-    p = compute_progress(plan, records)
-    assert next_incomplete(plan, p) == 2
-    assert next_incomplete(plan, p, after=2) == 3
-    assert next_incomplete(plan, p, after=198) == 2          # wraps around, skips 199, 0, 1
-    all_done = {f"a{i}": rec(plan, ids[i], f"a{i}") for i in range(200)}
-    assert next_incomplete(plan, compute_progress(plan, all_done)) is None
+    keep = next(k for k, t in enumerate(plan.trials) if t["object_id"] == "obj03")
+    done = {f"a{k}": rec(plan, tid, f"a{k}") for k, tid in enumerate(ids) if k != keep}
+    p1 = compute_progress(plan, done)
+    target = plan.trials[keep]["target_label"]
+    assert pick_trial(plan, p1, {"obj03"}, recent_targets=[target] * 2, exclude=keep) == keep
 
 
 def test_training_candidate_is_hold_only_and_requires_clean_accepted():

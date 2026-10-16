@@ -164,8 +164,10 @@ Older plan files without movement are used unchanged; their trials are recorded 
 |---|---|---|---|---|---|
 | 13/13/14 | 11/11/10 | 11/11/10 | 11/11/10 | 11/10/11 | 10/11/11 |
 
-Accept counts a planned trial once; Reject moves on (trial comes back later); Repeat retries
-now. Every attempt is a new folder. Progress is recomputed from `trial.json` files.
+Tick the objects you have under *Available objects*: the next trial is drawn at random from
+the remaining planned trials for those objects, plus empty hand until its trials are done
+(no target three times in a row; reproducible from the plan seed). Accept counts a planned
+trial once; Reject moves on (trial comes back later); Repeat retries now. Every attempt is a new folder. Progress is recomputed from `trial.json` files.
 *Mode → Manual* is for practice / held-out tests (never counted).
 
 ```

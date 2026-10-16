@@ -9,7 +9,7 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 from ..collection.controller import (FINALIZING, HAND_SIDES, IDLE, REVIEW, REVIEW_REASONS,
                                      ROLES, RUNNING, SAVING_REVIEW, CollectionController,
                                      TrialSpec)
-from ..collection.plan import EMPTY_HAND, default_posture, merge_objects
+from ..collection.plan import DEFAULT_PLAN_COUNTS, EMPTY_HAND, default_posture, merge_objects
 from ..collection.protocol import (ABORTED, HOLD, OPERATOR_NOTES, PREPARE, REST, SETTLE,
                                    MOTION_ORDER, MOTIONS, STATIONARY, TARGET_ORDER, TARGETS,
                                    ProtocolSettings, phase_instruction)
@@ -182,6 +182,24 @@ class StiffnessCollectionPanel(QtWidgets.QWidget):
         self.plan_row.setLayout(row)
         row.setContentsMargins(0, 0, 0, 0)
         form.addRow("Plan", self.plan_row)
+        self.avail_row = QtWidgets.QWidget()
+        grid = QtWidgets.QGridLayout(self.avail_row)
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setVerticalSpacing(2)
+        grid.addWidget(QtWidgets.QLabel("Available objects:"), 0, 0, 1, 3)
+        self.avail_checks = {}
+        for i, oid in enumerate(o for o in DEFAULT_PLAN_COUNTS if o != EMPTY_HAND):
+            cb = QtWidgets.QCheckBox(oid)
+            cb.setChecked(True)
+            cb.toggled.connect(self._on_available_changed)
+            self.avail_checks[oid] = cb
+            grid.addWidget(cb, 1 + i // 3, i % 3)
+        empty = QtWidgets.QCheckBox(EMPTY_HAND)          # always eligible until done
+        empty.setChecked(True)
+        empty.setEnabled(False)
+        empty.setToolTip("Always included until its planned trials are complete")
+        grid.addWidget(empty, 1 + len(self.avail_checks) // 3, len(self.avail_checks) % 3)
+        form.addRow(self.avail_row)                    # full width: fits the narrow panel
         self.next_label = QtWidgets.QLabel("--")        # explicit short lines, no wrapping
         form.addRow(self.next_label)
 
@@ -413,7 +431,7 @@ class StiffnessCollectionPanel(QtWidgets.QWidget):
 
     def _on_mode_changed(self, *_):
         plan = self.mode == PLAN_MODE
-        for w, show in ((self.plan_row, plan), (self.next_label, plan),
+        for w, show in ((self.plan_row, plan), (self.avail_row, plan), (self.next_label, plan),
                         (self.trial_spin, not plan)):
             w.setVisible(show)
             lab = self._form.labelForField(w)
@@ -426,6 +444,11 @@ class StiffnessCollectionPanel(QtWidgets.QWidget):
         self._shown_version = None
         self._planned_shown = None
         self._show_planned()
+
+    def _on_available_changed(self, *_):
+        self.controller.set_available_objects(
+            [oid for oid, cb in self.avail_checks.items() if cb.isChecked()])
+        self._planned_shown = None
 
     def _on_plan_selected(self, idx: int):
         self.controller.select_plan(self.plan_combo.itemData(idx))
@@ -492,8 +515,12 @@ class StiffnessCollectionPanel(QtWidgets.QWidget):
         c = self.controller
         blockers = c.start_blockers(self.spec())
         if self.mode == PLAN_MODE and c.planned_trial() is None:
-            first = ("Plan complete" if c.plan is not None else
-                     "No plan: create one with New… (or use Manual for practice)")
+            if c.plan is None:
+                first = "No plan: create one with New… (or use Manual for practice)"
+            elif c.progress is not None and c.progress.remaining:
+                first = "No remaining trials for the ticked objects: tick more objects"
+            else:
+                first = "Plan complete"
             blockers = [first] + [b for b in blockers if "come from the plan" not in b
                                   and "match the planned" not in b]
         return blockers
@@ -581,6 +608,8 @@ class StiffnessCollectionPanel(QtWidgets.QWidget):
                 i = self.object_combo.findData(current)
                 self.object_combo.setCurrentIndex(max(i, 0))
             self.objects_edit.setPlainText("\n".join(f"{o} = {n}" for o, n in c.objects))
+            for oid, cb in self.avail_checks.items():
+                cb.setToolTip(c.object_name(oid))
             self._on_object_changed()
         plans = [p.plan_id for p in c.plans]
         if plans != self._plans_shown:
@@ -606,6 +635,9 @@ class StiffnessCollectionPanel(QtWidgets.QWidget):
             self.next_label.setText("Next: loading…")
         elif c.plan is None:
             self.next_label.setText("Next: no plan yet.<br>Enter a participant, then New…")
+        elif t is None and c.progress is not None and c.progress.remaining:
+            self.next_label.setText("Next: <b>none</b> for the ticked objects<br>"
+                                    f"{c.progress.remaining} trials need other objects")
         elif t is None:
             self.next_label.setText(f"Next: <b>plan complete</b> ({c.plan.total} trials)")
         else:
@@ -616,7 +648,9 @@ class StiffnessCollectionPanel(QtWidgets.QWidget):
             self.next_label.setText(
                 f"Next: <b>{t['trial_id']}</b> of {c.plan.total} · "
                 f"<b>{TARGETS[t['target_label']]['display']}</b> · {t['posture_id']}<br>"
-                f"{t['object_id']} ({name})<br>Movement: <b>{MOTION_SHORT[motion]}</b>{v1}")
+                f"{t['object_id']} ({name})<br>Movement: <b>{MOTION_SHORT[motion]}</b>{v1}"
+                + (f"<br><small>random pick of {c.selection['eligible']} eligible</small>"
+                   if c.selection else ""))
             if c.state == IDLE and t["trial_id"] != self._planned_shown:
                 self._planned_shown = t["trial_id"]
                 self.motion_combo.setCurrentIndex(self.motion_combo.findData(motion))
@@ -695,6 +729,8 @@ class StiffnessCollectionPanel(QtWidgets.QWidget):
             w.setEnabled(idle)
         self.advanced.setEnabled(idle)
         self.plan_combo.setEnabled(idle and plan_mode and len(c.plans) > 0)
+        for cb in self.avail_checks.values():
+            cb.setEnabled(idle and plan_mode)
         self.btn_new_plan.setEnabled(idle and plan_mode and c.participant_id is not None
                                      and not c.loading)
         for w in (self.object_combo, self.target_combo, self.motion_combo, self.role_combo,
