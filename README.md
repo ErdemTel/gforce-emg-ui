@@ -123,7 +123,7 @@ each (data collection only). Raw files are the same as for manual recordings.
 
 ```bash
 .venv/bin/python -m gforce_emg_ui                                  # real band
-.venv/bin/python -m gforce_emg_ui --simulate --sim-contact good    # software test
+.venv/bin/python -m gforce_emg_ui --simulate                       # software test
 ```
 
 **Protocol** (durations editable under *Protocol & plan settings*, saved per trial):
@@ -134,8 +134,7 @@ only when you click Start.
 **Movement** (one per trial, saved as `motion_condition` with a versioned instruction):
 stationary, wrist flexion/extension, forearm rotation, reach/sweep. Moving trials start the
 movement in SETTLE and continue it through HOLD; HOLD means keeping the instructed effort,
-not staying still. Movement is never rejected automatically; contact and recording checks
-still apply.
+not staying still. Movement is never rejected automatically; recording checks still apply.
 
 **Labels** (`label_source = instructed_effort`; not measured stiffness or co-contraction):
 
@@ -146,14 +145,12 @@ still apply.
 | high | 2 | 1.0 | firm, comfortable, repeatable, not maximal; rest on fatigue |
 
 **Start is enabled only when**, for 3 s: streaming, newest EMG batch ≤ 0.5 s old (verify on
-the band), all 8 channels delivering, no red contact (green and orange OK; invalid = unknown),
-form valid, recorder free. EMG amplitude is never checked. The SDK gives no impedance
-timestamp, so freshness comes from EMG batches.
+the band), all 8 channels delivering, form valid, recorder free. Electrode contact and EMG
+amplitude are never checked: contact (even red) is only recorded in `trial.json`.
 
 **Aborts** (no resume; cannot be accepted): link loss, stale stream, segment
 reset, recorder or trial.json error, phase overrun > 1 s, manual Stop, Disconnect, closing
-the app. Red/unknown contact, lost/invalid samples and gaps during HOLD flag it; flagged HOLDs
-cannot be accepted.
+the app. Lost/invalid samples and gaps during HOLD flag it; flagged HOLDs cannot be accepted.
 
 **Plan** (*Mode → Plan*, *New…*): 200 accepted development trials per participant, seeded
 order, no target run > 2, saved before the first trial, resumed in later sessions. Each

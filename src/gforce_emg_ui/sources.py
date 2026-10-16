@@ -467,8 +467,7 @@ class SimGenerator:
 
     Cycles through 'gestures' that each activate a different channel pattern.
     Contact scenarios: "default" (CH6 marginal, CH8 loose, as before) or "good"
-    (all 8 channels <= 500 kOhm; simulation only, for exercising workflows that
-    require good contact).
+    (all 8 channels <= 500 kOhm; simulation only).
     """
 
     IMU_RATE = 50

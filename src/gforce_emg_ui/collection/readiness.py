@@ -1,10 +1,10 @@
-"""Stream and electrode-contact readiness, and per-trial stream-quality capture.
+"""Stream readiness and per-trial stream-quality capture.
 
-Electrode contact uses the existing impedance-based contact_level() thresholds:
-GOOD (green, <= 500 kOhm) and MARGINAL (orange, <= 999 kOhm) are accepted; POOR
-(red) blocks. Missing, NaN, infinite, zero or negative impedance is UNKNOWN and
-blocks too (no reading is not a green or orange signal). EMG amplitude is never
-used: low-effort trials are meant to have small signals.
+Electrode contact never blocks Start and never flags HOLD: it is only recorded,
+using the existing impedance-based contact_level() thresholds (GOOD green
+<= 500 kOhm, MARGINAL orange <= 999 kOhm, POOR red; missing, NaN, infinite,
+zero or negative impedance is UNKNOWN). EMG amplitude is never used either:
+low-effort trials are meant to have small signals.
 
 Freshness comes from received EMG batches (their host receipt time), never from
 the time an impedance value last changed: the SDK copies its latest impedance
@@ -25,11 +25,11 @@ from typing import Callable, List, NamedTuple, Optional, Tuple
 import numpy as np
 
 from ..config import EMG_CHANNELS
-from ..contact import GOOD, MARGINAL, UNKNOWN, contact_level, format_kohm
+from ..contact import GOOD, MARGINAL, UNKNOWN, contact_level
 from ..sources import STREAMING
 
 
-ACCEPTED_LEVELS = (GOOD, MARGINAL)          # green + orange; red / unknown block
+OK_LEVELS = (GOOD, MARGINAL)        # green + orange; red / unknown are listed (info only)
 
 
 def channel_levels(impedance) -> Tuple[str, ...]:
@@ -62,10 +62,6 @@ class BlockRecord(NamedTuple):            # NamedTuple: cheap to build on the da
     channels_present: bool    # every channel has at least one valid sample in the batch
     levels: Tuple[str, ...]
     impedance: Tuple[Optional[float], ...]
-
-    @property
-    def contact_ok(self) -> bool:
-        return all(lv in ACCEPTED_LEVELS for lv in self.levels)
 
 
 class StreamTracker:
@@ -101,7 +97,7 @@ class StreamTracker:
             n_invalid=int(np.count_nonzero(~valid.all(axis=0))),
             channels_present=valid.shape[0] >= EMG_CHANNELS and bool(valid.any(axis=1).all()),
             levels=self._prev_levels, impedance=self._prev_imp_list)
-        ok = rec.contact_ok and rec.channels_present
+        ok = rec.channels_present
         with self._lock:
             prev = self._last
             restart = (prev is None or prev.segment != rec.segment
@@ -147,8 +143,8 @@ class StreamTracker:
 
 @dataclass
 class Readiness:
-    ready: bool                   # stream + contact OK and stable for required_s
-    stream_contact_ok: bool       # OK right now (before the stability period)
+    ready: bool                   # stream OK and stable for required_s
+    stream_ok: bool               # OK right now (before the stability period)
     stable_for_s: float
     required_s: float
     blockers: List[str]
@@ -159,7 +155,7 @@ class Readiness:
     source_state: str
 
     def snapshot(self) -> dict:
-        return {"ready": self.ready, "stream_contact_ok": self.stream_contact_ok,
+        return {"ready": self.ready, "stream_ok": self.stream_ok,
                 "stable_for_s": self.stable_for_s, "required_s": self.required_s,
                 "blockers": list(self.blockers),
                 "contact_levels": {f"ch{i + 1}": lv for i, lv in enumerate(self.levels)},
@@ -197,20 +193,12 @@ class ReadinessMonitor:
         else:
             age = now - last.host_mono
             segment = last.segment
-            fresh = source_state == STREAMING and age <= freshness_s
             if age > freshness_s:
                 blockers.append(f"EMG stale: last batch {age:.1f} s ago (limit {freshness_s:g} s)")
             if not last.channels_present:
                 blockers.append("not all 8 EMG channels delivered valid data")
-            if not fresh:
-                blockers.append("contact unknown (no fresh EMG)")
-            else:
-                levels, imp = last.levels, last.impedance   # only trusted on fresh data
-                bad = [f"CH{i + 1} {lv}" + (f" ({format_kohm(imp[i])})" if imp[i] is not None
-                                            else "")
-                       for i, lv in enumerate(levels) if lv not in ACCEPTED_LEVELS]
-                if bad:
-                    blockers.append("contact not OK: " + ", ".join(bad))
+            if source_state == STREAMING and age <= freshness_s:
+                levels, imp = last.levels, last.impedance   # recorded only; never a blocker
         if segment != self._segment:
             self._segment = segment
             self._blocked_at = now          # reconnect / new segment: start over
@@ -224,7 +212,7 @@ class ReadinessMonitor:
         ready = ok_now and stable >= readiness_s
         if ok_now and not ready:
             # whole seconds: the text (and the panel layout) changes once per second, not per tick
-            blockers.append(f"waiting for stable contact: {math.ceil(readiness_s - stable):d} s")
+            blockers.append(f"waiting for stable stream: {math.ceil(readiness_s - stable):d} s")
         return Readiness(ready, ok_now, stable, readiness_s, blockers, levels, imp, age,
                          segment, source_state)
 
@@ -275,13 +263,11 @@ def summarize_window(records: List[BlockRecord], prev: Optional[BlockRecord],
         for ch, lv in enumerate(r.levels):
             seen.setdefault(f"ch{ch + 1}", set()).add(lv)
     out["contact_levels_seen"] = {k: sorted(v) for k, v in seen.items()}
-    out["contact_not_ok"] = [k for k, v in seen.items() if not v <= set(ACCEPTED_LEVELS)]
-    out["contact_marginal"] = [k for k, v in seen.items() if MARGINAL in v]   # info only
+    out["contact_not_ok"] = [k for k, v in seen.items() if not v <= set(OK_LEVELS)]   # info only
+    out["contact_marginal"] = [k for k, v in seen.items() if MARGINAL in v]           # info only
     flags = []
     if not inside:
         flags.append("no_emg_received")
-    if out["contact_not_ok"]:
-        flags.append("contact_not_ok:" + ",".join(c.upper() for c in out["contact_not_ok"]))
     if out["lost_samples"]:
         flags.append(f"lost_samples:{out['lost_samples']}")
     if out["samples_with_invalid_channels"]:

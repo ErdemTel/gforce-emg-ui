@@ -1,5 +1,5 @@
-"""Readiness gate (stream freshness + impedance contact) and stream-quality
-summaries, with a fake monotonic clock and hand-built EMG blocks."""
+"""Readiness gate (stream freshness; contact recorded, never blocking) and
+stream-quality summaries, with a fake monotonic clock and hand-built EMG blocks."""
 
 import numpy as np
 import pytest
@@ -69,9 +69,9 @@ def test_channel_levels_use_existing_thresholds_and_invalid_is_unknown():
 def test_all_good_becomes_ready_only_after_the_stability_period():
     rig = Rig(readiness=3.0)
     r = rig.run(2.0)
-    assert r.stream_contact_ok and not r.ready
+    assert r.stream_ok and not r.ready
     assert r.stable_for_s == pytest.approx(1.95, abs=0.06)
-    assert any("waiting for stable contact" in b for b in r.blockers)
+    assert any("waiting for stable stream" in b for b in r.blockers)
     r = rig.run(1.1)
     assert r.ready and r.blockers == []
     assert r.levels == (GOOD,) * 8
@@ -83,29 +83,25 @@ def test_no_data_yet_is_not_ready():
     assert not r.ready and "no EMG received yet" in r.blockers
 
 
-@pytest.mark.parametrize("ch,value,word", [(7, 1.4e6, "poor"), (5, 1.0e6, "poor"),
-                                           (2, np.nan, "unknown"), (0, 0.0, "unknown"),
-                                           (4, -1.0, "unknown"), (3, np.inf, "unknown")])
-def test_one_bad_or_invalid_channel_blocks_readiness(ch, value, word):
+@pytest.mark.parametrize("ch,value,level", [(7, 1.4e6, POOR), (5, 1.0e6, POOR),
+                                            (1, 700e3, MARGINAL), (2, np.nan, UNKNOWN),
+                                            (0, 0.0, UNKNOWN), (4, -1.0, UNKNOWN),
+                                            (3, np.inf, UNKNOWN)])
+def test_contact_never_blocks_readiness(ch, value, level):
     rig = Rig(readiness=0.5)
     imp = GOOD_IMP.copy()
     imp[ch] = value
-    r = rig.run(2.0, imp=imp)
-    assert not r.ready and not r.stream_contact_ok
-    text = " ".join(r.blockers)
-    assert f"CH{ch + 1} {word}" in text
-    assert r.stable_for_s == 0.0
-
-
-def test_orange_contact_is_accepted():
-    rig = Rig(readiness=0.5)
-    imp = GOOD_IMP.copy()
-    imp[[1, 5]] = (700e3, 999e3)                     # orange (<= 999 kOhm), no red
     r = rig.run(1.0, imp=imp)
-    assert r.ready and r.blockers == []
-    assert r.levels[1] == r.levels[5] == MARGINAL
-    r = rig.run(1.0, imp=np.full(8, 900e3))          # all orange
-    assert r.ready
+    assert r.ready and r.stream_ok and r.blockers == []
+    assert r.levels[ch] == level                     # still recorded
+
+
+def test_all_red_or_missing_contact_is_ready():
+    rig = Rig(readiness=0.5)
+    r = rig.run(1.0, imp=np.full(8, 3e6))            # all red
+    assert r.ready and r.levels == (POOR,) * 8
+    r = rig.run(1.0, imp=np.full(8, np.nan))         # no impedance reading
+    assert r.ready and r.levels == (UNKNOWN,) * 8
 
 
 def test_unchanged_good_impedance_on_fresh_emg_stays_ready():
@@ -152,14 +148,26 @@ def test_reconnect_new_segment_requires_full_stability_again():
 def test_bad_block_between_evaluations_restarts_stability():
     rig = Rig(readiness=1.0)
     assert rig.run(2.0).ready
-    bad = GOOD_IMP.copy()
-    bad[3] = 2e6
+    valid = np.ones((8, 16), bool)
+    valid[3] = False
     rig.clock.t += 0.02
-    rig.push(imp=bad)                             # blip never seen by evaluate()
+    rig.push(valid=valid)                         # blip never seen by evaluate()
     rig.clock.t += 0.02
     rig.push()
     r = rig.evaluate()
     assert not r.ready and r.stable_for_s < 0.05
+
+
+def test_red_contact_blip_does_not_restart_stability():
+    rig = Rig(readiness=1.0)
+    assert rig.run(2.0).ready
+    bad = GOOD_IMP.copy()
+    bad[3] = 2e6
+    rig.clock.t += 0.02
+    rig.push(imp=bad)
+    rig.clock.t += 0.02
+    rig.push()
+    assert rig.evaluate().ready
 
 
 def test_missing_channel_blocks_readiness():
@@ -239,11 +247,10 @@ def test_quality_window_only_counts_batches_inside_and_contact_in_effect_at_star
     # window starts after the poor batch, but the poor level was still in effect at t0
     t0 = recs[0].host_mono + 0.01
     q = summarize_window(recs, prev, t0, recs[-1].host_mono, 0.5)
-    assert q["batches"] == 3 and q["contact_not_ok"] == ["ch8"]
-    assert "contact_not_ok:CH8" in q["flags"]
-    # a window entirely after recovery is clean
+    assert q["batches"] == 3 and q["contact_not_ok"] == ["ch8"]      # recorded
+    assert q["flags"] == []                                           # never flagged
     q2 = summarize_window(recs, prev, recs[1].host_mono + 0.01, recs[-1].host_mono, 0.5)
-    assert q2["flags"] == []
+    assert q2["contact_not_ok"] == [] and q2["flags"] == []
 
 
 def test_segment_change_inside_window_is_flagged():

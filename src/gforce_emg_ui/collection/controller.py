@@ -827,9 +827,9 @@ class CollectionController:
             },
             "readiness": {"settings": {"readiness_s": st.readiness_s,
                                        "emg_freshness_s": st.emg_freshness_s,
-                                       "contact_rule": "all 8 channels GOOD or MARGINAL by "
-                                                       "contact_level() (<= 999 kOhm); POOR "
-                                                       "or invalid/unknown blocks"},
+                                       "contact_rule": "not checked: electrode contact never "
+                                                       "blocks Start or flags HOLD; levels and "
+                                                       "impedance are recorded for reference"},
                           "initial_snapshot": r.snapshot() if r else None},
             "timing": {"start": None, "end": None, "events": [], "phases": [], "flags": []},
             "training_candidate": None,

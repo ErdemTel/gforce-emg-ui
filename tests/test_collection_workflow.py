@@ -390,22 +390,23 @@ def test_stale_stream_and_segment_reset_abort(qapp, tmp_path, fault, reason):
         close_rig(r)
 
 
-def test_orange_contact_trial_is_ready_clean_and_acceptable(qapp, tmp_path):
+def test_red_contact_trial_is_ready_clean_and_acceptable(qapp, tmp_path):
     r = make_rig(qapp, tmp_path, source=FakeSource)
     try:
-        r.src.imp = [250e3, 700e3, 250e3, 250e3, 250e3, 950e3, 250e3, 250e3]   # 2 orange
+        r.src.imp = [250e3, 700e3, 1.5e6, 250e3, 250e3, 3e6, 250e3, 0.0]   # orange, 2 red, unknown
         folder = run_trial(r, manual_spec(r))
         d = sidecar(folder)
-        snap = d["readiness"]["initial_snapshot"]["contact_levels"]
-        assert snap["ch2"] == snap["ch6"] == "marginal" and snap["ch1"] == "good"
+        snap = d["readiness"]["initial_snapshot"]
+        assert snap["ready"] and snap["blockers"] == []
+        levels = snap["contact_levels"]
+        assert (levels["ch2"], levels["ch3"], levels["ch8"]) == ("marginal", "poor", "unknown")
         hold = d["quality"]["hold"]
-        assert hold["contact_marginal"] == ["ch2", "ch6"] and hold["contact_not_ok"] == []
+        assert hold["contact_marginal"] == ["ch2"]
+        assert hold["contact_not_ok"] == ["ch3", "ch6", "ch8"]                # recorded only
         assert d["training_candidate"]["quality_status"] == "clean" and r.c.acceptable
-        assert "MARGINAL" in d["readiness"]["settings"]["contact_rule"]
+        assert "never blocks" in d["readiness"]["settings"]["contact_rule"]
         review(r, "accept")
-        r.src.imp = [250e3] * 7 + [1.5e6]                                    # red -> blocked
-        assert drive(r.c, lambda: any("CH8 poor" in b for b in r.c.readiness.blockers), r.app)
-        assert not r.c.readiness.ready
+        assert folder.exists()
     finally:
         r.src.stop()
         close_rig(r)
@@ -589,10 +590,10 @@ def test_recorder_extensions_are_backward_compatible(tmp_path):
 
 # -- MainWindow integration ---------------------------------------------------------
 
-def make_window(qapp, tmp_path):
+def make_window(qapp, tmp_path, contact="good"):
     from gforce_emg_ui.ui.main_window import MainWindow
     hub = DataHub()
-    src = SimSource(hub, seed=4, contact="good")
+    src = SimSource(hub, seed=4, contact=contact)
     win = MainWindow(hub, src, tmp_path)
     panel = win.collection_panel
     for key, value in dict(prepare_s=0.2, settle_s=0.2, hold_s=0.3, rest_s=0.2,
@@ -612,6 +613,18 @@ def start_panel_trial(qapp, win, panel):
     assert wait_until(lambda: panel.btn_start.isEnabled(), 5, qapp), panel.ready_label.text()
     panel.btn_start.click()
     assert win.collection.owns_recorder and win.collection.state == RUNNING
+
+
+def test_panel_start_is_enabled_with_red_contact(qapp, tmp_path):
+    win, src, panel = make_window(qapp, tmp_path, contact="default")   # CH6 orange, CH8 red
+    try:
+        win.record_tabs.setCurrentIndex(1)
+        assert wait_until(lambda: panel.btn_start.isEnabled(), 5, qapp), panel.ready_label.text()
+        assert "Ready" in panel.ready_label.text()
+        assert win.collection.readiness.levels[7] == "poor"
+    finally:
+        src.disconnect_device()
+        win.close()
 
 
 def test_manual_recording_blocks_collection_and_keeps_its_format(qapp, tmp_path):

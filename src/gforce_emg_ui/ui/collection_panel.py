@@ -746,7 +746,7 @@ class StiffnessCollectionPanel(QtWidgets.QWidget):
                                    and c.machine.phase == REST)
         if idle:
             if not blockers:
-                text = "<b style='color:#2e7d32'>✔ Ready</b> – contact OK (no red), stable"
+                text = "<b style='color:#2e7d32'>✔ Ready</b> – stream stable"
             else:
                 text = "<b style='color:#c62828'>Not ready:</b> " + " · ".join(blockers[:5])
             self.ready_label.setText(text)

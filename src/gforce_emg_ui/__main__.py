@@ -22,7 +22,7 @@ def main(argv=None):
                     help="where recordings are saved")
     ap.add_argument("--sim-contact", choices=("default", "good"), default="default",
                     help="simulator only: electrode-contact scenario ('good' = all 8 "
-                         "channels good, to exercise the stiffness-collection workflow)")
+                         "channels good)")
     args = ap.parse_args(argv)
     if args.sim_contact != "default" and not args.simulate:
         ap.error("--sim-contact requires --simulate")

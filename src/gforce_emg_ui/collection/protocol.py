@@ -24,7 +24,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Callable, List, Optional
 
 SCHEMA_VERSION = 2                      # 2: motion_condition + movement instruction
-PROTOCOL_VERSION = "stiffness-phase0/1.2"     # 1.2: orange contact accepted
+PROTOCOL_VERSION = "stiffness-phase0/1.3"     # 1.3: contact never blocks or flags
 LABEL_SOURCE = "instructed_effort"
 LABEL_SEMANTICS = ("Instructed effort level / intended robot gain command. NOT measured physical "
                    "human stiffness, force, %MVC, EMG amplitude or verified co-contraction.")
