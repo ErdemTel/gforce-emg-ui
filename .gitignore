@@ -41,7 +41,8 @@ objects.json
 *.edf
 *.bdf
 
-# trained models / training runs
+# trained models / training runs / live classifier logs
+live_logs/
 models/
 checkpoints/
 runs/

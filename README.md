@@ -88,6 +88,7 @@ callback, default 16; lower = less latency, the vendor demo uses 32), `--data-di
 | **Battery** | Percentage bar, updated by the band |
 | **Settings** | EMG sample rate 500/1000 Hz, on-board filters (50/60 Hz notch, 10 Hz HPF, 200 Hz LPF) |
 | **Recording** | Two subtabs sharing one recorder: **Manual** (CSV session folders with markers, Ctrl+M) and **Stiffness Collection** (guided, timed, labelled trials; see below) |
+| **Live Classifier** | Frozen effort model's live output s = 0 / 0.5 / 1 (or `s = --`), class probabilities, history, host-side timings; see below |
 | **Status bar** | Actual vs nominal rates (red warning on mismatch), lost packets/samples, index gaps, segment, callback gap p95, host-only callback→draw age; sensor→host latency is reported as not measured |
 
 ## Recordings
@@ -186,6 +187,47 @@ receipt time: trim boundaries when processing).
 inspect their `emg.csv` / `markers.csv` / `trial.json`, confirm no false stale aborts with
 the 0.5 s limit, then start the plan.
 
+## Live classifier
+
+Display-only. Shows the frozen [emg-classifier](https://github.com/ErdemTel/emg-stiffness-data)
+model's prediction of the **instructed effort** class from the live EMG: s = 0 (low),
+0.5 (medium), 1 (high), or `s = --` when there is no fresh valid prediction. Not measured
+stiffness. Low was trained as minimal effort *with the grasp kept*; a relaxed/open hand is
+not validated.
+
+Install the classifier into this `.venv` (pins = the model's training environment; nothing
+else is upgraded). Clone the private data repo next to this one
+(`git clone -b classifier https://github.com/ErdemTel/emg-stiffness-data.git`; it contains the
+selected model `runs/lda_hold_001/model.joblib`), then from this folder (Windows: same
+commands in PowerShell with `.venv\Scripts\pip`):
+
+```bash
+git --git-dir=../emg-stiffness-data/.git archive -o ../clf.tar classifier pyproject.toml README.md src
+mkdir ../clf
+tar -xf ../clf.tar -C ../clf
+.venv/bin/pip wheel --no-deps -w ../clf/wheels ../clf
+.venv/bin/pip install -c constraints-live.txt ../clf/wheels/emg_classifier-0.1.0-py3-none-any.whl
+```
+
+Use: connect the band → **Live Classifier** → *Load model…* (a trusted local
+`model.joblib`; joblib/pickle runs code, nothing loads automatically) → review
+*Compatibility* (incompatible settings block Start; warnings need a tick) → *Start* →
+warm-up → comfortable low / medium / high effort → *Stop*.
+
+- Windows and hop come from the model (sample counts, e.g. 100 / 25); features and
+  probabilities come from the classifier's own `predict_windows`. Raw output: no smoothing,
+  voting, rest gate or thresholds.
+- Lost/invalid/non-finite samples, index gaps, segment or stream changes, dropped input and
+  stale input (> 0.5 s, to verify on the band) reset the window; a reconnect resets it,
+  a disconnect or a filter/rate change stops it.
+- *Log predictions* writes `predictions.csv`, `events.csv`, `display.csv` and `run.json` to a
+  new folder under `live_logs/` (git-ignored). No labels are recorded.
+- Timings shown are host-side only (not sensor-to-display latency).
+
+Disable: `.venv/bin/pip uninstall emg-classifier` (the tab then says so; recording is
+unaffected). Remove: delete `src/gforce_emg_ui/live/`, `ui/live_view.py`,
+`tests/test_live_*.py`, `constraints-live.txt` and the `live` lines in `ui/main_window.py`.
+
 ## Connection states
 
 `idle → scanning → connecting → streaming`. A failed connect cleans up and ends in `failed`.
@@ -202,6 +244,8 @@ band (BLE) ─► SdkSource._on_data (SDK thread: copy out of native buffers, ma
                  │                                                (Qt timer ~30 FPS, visible tab,
                  │                                                 skipped when nothing changed)
                  ├──► Recorder session (bounded queue → writer thread)
+                 ├──► LiveEngine (bounded inbox → worker: windows → frozen model;
+                 │                watchdog; latest result read by the Live Classifier tab)
                  └──► subscribe_emg_async(decoder) (own thread, bounded queue)
 ```
 
@@ -221,7 +265,13 @@ and counted. Features live in `features.py` (`ac_rms` excludes invalid samples).
 .venv/bin/python -m pytest                     # unit + regression + fault-injection tests
 .venv/bin/python -m pytest tests/test_collection_*.py   # stiffness collection only
 .venv/bin/python -m gforce_emg_ui.bench        # host-only benchmark (add --quick, --json out.json)
+.venv/bin/python -m pytest tests/test_live_*.py           # live classifier
+.venv/bin/python -m gforce_emg_ui.live.bench --model PATH # live classifier, simulated bursts
 ```
+
+Real-model live tests use `../emg-stiffness-data/runs/lda_hold_001/model.joblib` and
+`../emg-stiffness-data/Erdem` (override with `GFORCE_LIVE_MODEL`, `GFORCE_LIVE_DATA`) and are
+skipped when absent.
 
 The benchmark uses simulated data only. It does **not** measure the band, BLE throughput or
 end-to-end sensor latency.
