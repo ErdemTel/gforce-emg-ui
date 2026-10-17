@@ -339,6 +339,18 @@ def test_corrupt_missing_and_mismatched_files(tmp_path):
     assert any("model.json not found" in w for w in load_trusted_model(path).warnings)
 
 
+@pytest.mark.skipif(not classifier_status()[0], reason="emg-classifier not installed")
+def test_source_hash_ignores_windows_line_endings(tmp_path):
+    import emg_classifier
+    from gforce_emg_ui.live.model import package_sha256
+    pkg = Path(emg_classifier.__file__).parent
+    for f in pkg.glob("*.py"):                            # as Git on Windows exports them
+        (tmp_path / f.name).write_bytes(f.read_bytes().replace(b"\n", b"\r\n"))
+    assert package_sha256(tmp_path) == package_sha256(pkg)
+    if MODEL.is_file():
+        assert package_sha256(tmp_path) == CODE_SHA256
+
+
 def test_missing_classifier_package_gives_an_actionable_message(tmp_path, monkeypatch):
     f = tmp_path / "model.joblib"
     f.write_bytes(b"x")

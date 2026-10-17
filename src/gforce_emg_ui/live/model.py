@@ -88,12 +88,13 @@ def classifier_status() -> Tuple[bool, str]:
 
 
 def package_sha256(pkg_dir: Path) -> str:
-    """Same recipe as emg_classifier.provenance.code_hash(), applied to the installed
-    package (that function hashes the source checkout, not site-packages)."""
+    """emg_classifier.provenance.code_hash() recipe applied to the installed package (that
+    function hashes the source checkout, not site-packages). CRLF is read as LF: Git on
+    Windows checks out / archives the same sources with CRLF line endings."""
     h = hashlib.sha256()
     for p in sorted(Path(pkg_dir).glob("*.py")):
         h.update(p.name.encode())
-        h.update(p.read_bytes())
+        h.update(p.read_bytes().replace(b"\r\n", b"\n"))
     return h.hexdigest()
 
 

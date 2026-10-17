@@ -6,7 +6,7 @@ Python package, PyQt5 and pyqtgraph.
 
 ## Setup
 
-Requires Python ≥ 3.10 and git. `sensor-sdk` ships wheels for **Linux x86_64/arm64,
+Requires Python ≥ 3.10 (3.12–3.14 for the Live Classifier) and git. `sensor-sdk` ships wheels for **Linux x86_64/arm64,
 Windows x64 and macOS on Apple Silicon (arm64)**; Intel Macs and 32-bit/ARM Windows are
 not supported by the SDK.
 
@@ -49,7 +49,7 @@ In PowerShell:
 ```powershell
 git clone https://github.com/ErdemTel/gforce-emg-ui.git
 cd gforce-emg-ui
-py -3.12 -m venv .venv                # python.org installer; any 3.10+ works
+py -3.13 -m venv .venv                # 64-bit python.org installer; 3.12–3.14 for the Live Classifier
 .venv\Scripts\python -m pip install -e ".[dev]"
 .venv\Scripts\python -m gforce_emg_ui --simulate
 ```
@@ -199,7 +199,8 @@ Install the classifier into this `.venv` (pins = the model's training environmen
 else is upgraded). Clone the private data repo next to this one
 (`git clone -b classifier https://github.com/ErdemTel/emg-stiffness-data.git`; it contains the
 selected model `runs/lda_hold_001/model.joblib`), then from this folder (Windows: same
-commands in PowerShell with `.venv\Scripts\pip`):
+commands in PowerShell with `.venv\Scripts\pip`). Needs a 64-bit Python 3.12–3.14 `.venv` (the pinned
+numpy / scipy have no older wheels; pip then reports a numpy "conflict"):
 
 ```bash
 git --git-dir=../emg-stiffness-data/.git archive -o ../clf.tar classifier pyproject.toml README.md src
