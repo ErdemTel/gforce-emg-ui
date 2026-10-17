@@ -14,6 +14,10 @@ Plans v2 also assign a motion condition to every planned trial (each motion in
 every object x target cell). v1 plan files have no motion: they are loaded as
 they are, never rewritten, and their remaining trials are recorded stationary.
 Recorded trials without motion_condition keep it unknown (None).
+
+The next trial is drawn at random (pick_trial). One-trial edits of its object,
+target or movement are resolved to an existing incomplete planned trial with
+exactly those values (resolve_request); the plan itself is never changed.
 """
 
 import random
@@ -359,6 +363,12 @@ def eligible_trials(plan: TrialPlan, progress: Progress, available: Iterable[str
             if t["trial_id"] not in progress.completed and t["object_id"] in avail]
 
 
+def run_banned_target(recent_targets: Iterable[str], max_run: int = MAX_TARGET_RUN) -> Optional[str]:
+    """Target that would make a run of more than max_run, or None."""
+    tail = list(recent_targets)[-max_run:]
+    return tail[0] if len(tail) == max_run and len(set(tail)) == 1 else None
+
+
 def pick_trial(plan: TrialPlan, progress: Progress, available: Iterable[str],
                recent_targets: Iterable[str] = (), key: str = "",
                exclude: Optional[int] = None, max_run: int = MAX_TARGET_RUN) -> Optional[int]:
@@ -374,10 +384,60 @@ def pick_trial(plan: TrialPlan, progress: Progress, available: Iterable[str],
         idx = [i for i in idx if i != exclude]
     if not idx:
         return None
-    tail = list(recent_targets)[-max_run:]
-    banned = tail[0] if len(tail) == max_run and len(set(tail)) == 1 else None
+    banned = run_banned_target(recent_targets, max_run)
     pool = [i for i in idx if plan.trials[i]["target_label"] != banned] or idx
     return random.Random(f"{plan.seed}:{key}").choice(pool)
+
+
+# -- one-trial edits of the next planned trial ---------------------------------------
+
+SELECTION_FIELDS = ("object_id", "target_label", "motion_condition")
+FIELD_NAMES = {"object_id": "object", "target_label": "target", "motion_condition": "movement"}
+MANUAL_SELECTION_RULE = "manual-override/exact-match/proposal-kept-or-lowest-index/v1"
+
+
+def trial_values(plan: TrialPlan, trial: dict) -> Dict[str, str]:
+    """Object / target / movement a planned trial is recorded with (v1 plans: stationary)."""
+    return {"object_id": trial["object_id"], "target_label": trial["target_label"],
+            "motion_condition": plan.motion_of(trial)}
+
+
+def describe(values: dict) -> str:
+    """'obj02 / medium / reach/sweep'."""
+    m = values.get("motion_condition")
+    return " / ".join([values.get("object_id") or "?", values.get("target_label") or "?",
+                       MOTIONS[m]["display"].lower() if m in MOTIONS else (m or "?")])
+
+
+def resolve_request(plan: TrialPlan, progress: Progress, request: dict,
+                    prefer: Iterable[Tuple[str, Optional[int]]] = ()
+                    ) -> Tuple[Optional[int], str, str]:
+    """(index, how, problem) of an incomplete planned trial with exactly the requested
+    object, target and movement.
+
+    prefer: (how, index) pairs tried first (the original proposal, the current
+    resolution); otherwise the lowest plan index. Requested values are never
+    changed and plan entries are never modified, so a request without a remaining
+    match stays as it is with a problem text.
+    """
+    missing = [FIELD_NAMES[f] for f in SELECTION_FIELDS if not request.get(f)]
+    if missing:
+        return None, "", f"Choose {' and '.join(missing)}."
+    if request["object_id"] not in plan.counts:
+        return None, "", (f"{request['object_id']} has no trials in this plan. Choose another "
+                          "object, reset edits, or use Manual mode for off-plan objects.")
+    if plan.motions is None and request["motion_condition"] != V1_PLAN_MOTION:
+        return None, "", "Plan v1 has no movement: choose Stationary or reset edits."
+    want = {f: request[f] for f in SELECTION_FIELDS}
+    idx = [i for i, t in enumerate(plan.trials)
+           if t["trial_id"] not in progress.completed and trial_values(plan, t) == want]
+    if not idx:
+        return None, "", (f"No remaining planned trials for {describe(want)}. "
+                          "Change a setting or reset edits.")
+    for how, i in prefer:
+        if i in idx:
+            return i, how, ""
+    return idx[0], "lowest_index", ""
 
 
 def training_candidate(rec: dict, require_accepted: bool = True) -> Optional[dict]:

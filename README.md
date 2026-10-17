@@ -170,6 +170,21 @@ attempts are kept: Reject, Repeat or closing the app before review deletes the a
 folder. Every attempt is a new folder. Progress is recomputed from `trial.json` files.
 *Mode → Manual* is for practice / held-out tests (never counted).
 
+**Edit the next trial** (Plan mode, idle): Object, Target and Movement show the random pick.
+Changing one changes only that field, for the next trial only; the app then uses a remaining
+planned trial with exactly that object / target / movement (lowest plan index; its trial ID
+may change, the plan file never does, the displaced pick stays pending). Posture follows the
+object. No match: Start stays disabled with the reason; change a field or *Reset edits*
+(back to the original pick). An explicitly chosen object may be unticked (warned, this trial
+only). Edits end with Accept / Reject and when the mode, participant, session, plan or
+output changes; Repeat keeps them. Example: pick `t045 obj03 / medium / reach_sweep`, Object →
+obj02 gives e.g. `t017 obj02 / medium / reach_sweep`.
+
+`trial.json` `selection.mode`: `automatic` (missing in older files) or `manual_override`, with
+`rule`, `automatic_proposal` (trial, values, how it was drawn), `edited_fields`,
+`differing_fields`, `requested`, `resolved`, `available_objects`, `availability_bypass`,
+`ordering_preference_bypass`, `recent_targets`, `repeat`. Schema / protocol versions unchanged.
+
 ```
 <data-dir>/stiffness_collection/P01/
   plan_plan-1a2b3c4d.json
@@ -265,6 +280,7 @@ and counted. Features live in `features.py` (`ac_rms` excludes invalid samples).
 ```bash
 .venv/bin/python -m pytest                     # unit + regression + fault-injection tests
 .venv/bin/python -m pytest tests/test_collection_*.py   # stiffness collection only
+.venv/bin/python -m pytest tests/test_collection_selection.py   # next-trial edits
 .venv/bin/python -m gforce_emg_ui.bench        # host-only benchmark (add --quick, --json out.json)
 .venv/bin/python -m pytest tests/test_live_*.py           # live classifier
 .venv/bin/python -m gforce_emg_ui.live.bench --model PATH # live classifier, simulated bursts

@@ -1,15 +1,20 @@
 """'Stiffness Collection' tab of the Recording section: a thin Qt layer over
-CollectionController (timed, labelled trials on the shared Recorder)."""
+CollectionController (timed, labelled trials on the shared Recorder).
+
+Plan mode: Object / Target / Movement show the controller's pending trial. Only
+user activation (`activated`) edits it, one field at a time; programmatic display
+uses QSignalBlocker and never counts as an edit."""
 
 from pathlib import Path
 from typing import Callable, Optional
 
 from PyQt5 import QtCore, QtGui, QtWidgets
 
-from ..collection.controller import (FINALIZING, HAND_SIDES, IDLE, REVIEW, REVIEW_REASONS,
-                                     ROLES, RUNNING, SAVING_REVIEW, CollectionController,
-                                     TrialSpec)
-from ..collection.plan import DEFAULT_PLAN_COUNTS, EMPTY_HAND, default_posture, merge_objects
+from ..collection.controller import (AVAILABILITY_BYPASS_TEXT, FINALIZING, HAND_SIDES, IDLE,
+                                     MANUAL_OVERRIDE, REVIEW, REVIEW_REASONS, ROLES, RUNNING,
+                                     SAVING_REVIEW, CollectionController, TrialSpec)
+from ..collection.plan import (DEFAULT_PLAN_COUNTS, EMPTY_HAND, FIELD_NAMES, default_posture,
+                               describe, merge_objects, trial_values)
 from ..collection.protocol import (ABORTED, HOLD, OPERATOR_NOTES, PREPARE, REST, SETTLE,
                                    MOTION_ORDER, MOTIONS, STATIONARY, TARGET_ORDER, TARGETS,
                                    ProtocolSettings, phase_instruction)
@@ -119,7 +124,9 @@ class StiffnessCollectionPanel(QtWidgets.QWidget):
         self._last_owns = False
         self._reviews_seen = 0
         self._shown_version = None
-        self._planned_shown = None
+        self._planned_key = None
+        self._posture_obj = None
+        self._session_seen = ""
         self._objects_shown = None
         self._plans_shown = None
         self._build()
@@ -202,6 +209,20 @@ class StiffnessCollectionPanel(QtWidgets.QWidget):
         form.addRow(self.avail_row)                    # full width: fits the narrow panel
         self.next_label = QtWidgets.QLabel("--")        # explicit short lines, no wrapping
         form.addRow(self.next_label)
+        self.sel_row = QtWidgets.QWidget()               # Automatic / Edited + reset
+        row = QtWidgets.QHBoxLayout(self.sel_row)
+        row.setContentsMargins(0, 0, 0, 0)
+        self.sel_state = QtWidgets.QLabel()
+        self.btn_reset_sel = QtWidgets.QPushButton("Reset edits")
+        self.btn_reset_sel.setToolTip("Clear this trial's edits and use the random selection")
+        row.addWidget(self.sel_state, 1)
+        row.addWidget(self.btn_reset_sel)
+        form.addRow(self.sel_row)
+        self.sel_note = QtWidgets.QLabel()               # plain text, wrapped
+        self.sel_note.setTextFormat(QtCore.Qt.PlainText)
+        self.sel_note.setWordWrap(True)
+        self.sel_note.setVisible(False)
+        form.addRow(self.sel_note)
 
         self.object_combo = QtWidgets.QComboBox()
         form.addRow("Object", self.object_combo)
@@ -331,6 +352,13 @@ class StiffnessCollectionPanel(QtWidgets.QWidget):
         self.plan_combo.activated.connect(self._on_plan_selected)
         self.btn_new_plan.clicked.connect(self._new_plan)
         self.object_combo.currentIndexChanged.connect(self._on_object_changed)
+        self._sel_combos = {"object_id": self.object_combo, "target_label": self.target_combo,
+                            "motion_condition": self.motion_combo}
+        for name, combo in self._sel_combos.items():
+            combo.activated.connect(lambda i, n=name, cb=combo: self._on_field_activated(
+                n, cb.itemData(i)))
+        self.btn_reset_sel.clicked.connect(self._reset_selection)
+        self.session_edit.editingFinished.connect(self._on_session_changed)
         self.btn_out.clicked.connect(self._choose_output)
         self.btn_advanced.toggled.connect(self._toggle_advanced)
         self.btn_start.clicked.connect(self.start_trial)
@@ -434,23 +462,53 @@ class StiffnessCollectionPanel(QtWidgets.QWidget):
     def _on_mode_changed(self, *_):
         plan = self.mode == PLAN_MODE
         for w, show in ((self.plan_row, plan), (self.avail_row, plan), (self.next_label, plan),
-                        (self.trial_spin, not plan)):
+                        (self.sel_row, plan), (self.trial_spin, not plan)):
             w.setVisible(show)
             lab = self._form.labelForField(w)
             if lab is not None:
                 lab.setVisible(show)
         if plan:
             self.role_combo.setCurrentIndex(ROLES.index("development"))
-        elif self.role_combo.currentData() == "development":
-            self.role_combo.setCurrentIndex(ROLES.index("practice"))
+        else:
+            self.controller.clear_edits()        # one-trial edits belong to Plan mode
+            self.sel_note.setVisible(False)
+            for combo in self._sel_combos.values():
+                if combo.currentIndex() < 0:     # Manual mode always has a value
+                    combo.setCurrentIndex(0)
+            if self.role_combo.currentData() == "development":
+                self.role_combo.setCurrentIndex(ROLES.index("practice"))
         self._shown_version = None
-        self._planned_shown = None
+        self._planned_key = None
+        self._posture_obj = None
         self._show_planned()
 
     def _on_available_changed(self, *_):
         self.controller.set_available_objects(
             [oid for oid, cb in self.avail_checks.items() if cb.isChecked()])
-        self._planned_shown = None
+        self._planned_key = None
+
+    def _on_field_activated(self, name: str, value):
+        """The operator picked a value: edit only that field of the next planned trial."""
+        if self.mode != PLAN_MODE:
+            return
+        self.controller.edit_selection(name, value)   # refused (busy): the display reverts
+        self._refresh_selection()
+
+    def _reset_selection(self):
+        self.controller.clear_edits()
+        self._refresh_selection()
+
+    def _refresh_selection(self):
+        self._planned_key = None
+        self._show_planned()
+        self._show_phase()
+        self._show_controls()
+
+    def _on_session_changed(self):
+        sid = self.session_edit.text().strip()
+        if sid != self._session_seen:
+            self._session_seen = sid
+            self.controller.clear_edits()        # no draft carried into another session
 
     def _on_plan_selected(self, idx: int):
         self.controller.select_plan(self.plan_combo.itemData(idx))
@@ -497,17 +555,27 @@ class StiffnessCollectionPanel(QtWidgets.QWidget):
     def spec(self) -> TrialSpec:
         c = self.controller
         planned = c.planned_trial() if self.mode == PLAN_MODE else None
-        oid = planned["object_id"] if planned else (self.object_combo.currentData() or "")
+        if planned:                              # Plan mode: from the controller, not the combos
+            oid, target, posture = (planned["object_id"], planned["target_label"],
+                                    planned["posture_id"])
+            motion = c.plan.motion_of(planned)
+        elif self.mode == PLAN_MODE:             # no valid trial: the requested values (blocked)
+            req = c.pending.requested if c.pending is not None else {}
+            oid, target, motion = (req.get(f) or "" for f in
+                                   ("object_id", "target_label", "motion_condition"))
+            posture = default_posture(oid)[0] if oid else ""
+        else:
+            oid = self.object_combo.currentData() or ""
+            target, motion = self.target_combo.currentData(), self.motion_combo.currentData()
+            posture = self.posture_combo.currentText().strip()
         return TrialSpec(
             participant_id=self.participant_edit.text().strip(),
             session_id=self.session_edit.text().strip(),
             hand_side=self.hand_combo.currentText(),
             object_id=oid, object_name=c.object_name(oid),
-            posture_id=self.posture_combo.currentText().strip(),
+            posture_id=posture,
             posture_description=self.posture_desc.text().strip(),
-            target_label=planned["target_label"] if planned else self.target_combo.currentData(),
-            motion_condition=(c.plan.motion_of(planned) if planned and c.plan
-                              else self.motion_combo.currentData()),
+            target_label=target, motion_condition=motion,
             dataset_role="development" if self.mode == PLAN_MODE else self.role_combo.currentData(),
             output_root=self.output_root, trial_number=self.trial_spin.value(),
             notes=self.notes_edit.text().strip(), planned_trial=planned,
@@ -517,19 +585,26 @@ class StiffnessCollectionPanel(QtWidgets.QWidget):
         c = self.controller
         blockers = c.start_blockers(self.spec())
         if self.mode == PLAN_MODE and c.planned_trial() is None:
+            p = c.pending
             if c.plan is None:
                 first = "No plan: create one with New… (or use Manual for practice)"
+            elif p is not None and p.edited:
+                first = p.problem or "No matching planned trial"
             elif c.progress is not None and c.progress.remaining:
-                first = "No remaining trials for the ticked objects: tick more objects"
+                first = ("No remaining trials for the ticked objects: tick more objects "
+                         "or choose object, target and movement")
             else:
                 first = "Plan complete"
-            blockers = [first] + [b for b in blockers if "come from the plan" not in b
-                                  and "match the planned" not in b]
+            noise = ("come from the plan", "match the planned", "Object ID:", "Posture ID:",
+                     "Target:", "Movement:")
+            blockers = [first] + [b for b in blockers if not any(n in b for n in noise)]
         return blockers
 
     def start_trial(self) -> bool:
         if self.mode == PLAN_MODE and self.controller.planned_trial() is None:
-            self._message("No planned trial (create or select a plan).", error=True)
+            p = self.controller.pending
+            self._message(p.problem if p is not None and p.problem else
+                          "No planned trial (create or select a plan).", error=True)
             return False
         ok = self.controller.start_trial(self.spec())
         if not ok:
@@ -629,48 +704,125 @@ class StiffnessCollectionPanel(QtWidgets.QWidget):
                 self.plan_combo.setCurrentIndex(self.plan_combo.findData(c.plan.plan_id))
 
     def _show_planned(self):
+        """Display the controller's next trial. Cheap per tick: text only on change,
+        combos only when they differ, nothing while one of their lists is open."""
         c = self.controller
         if self.mode != PLAN_MODE:
             return
-        t = c.planned_trial() if c.state == IDLE else (c.spec.planned_trial if c.spec else None)
+        idle = c.state == IDLE
+        if idle and any(cb.view().isVisible() for cb in self._sel_combos.values()):
+            return
+        key = (c.selection_version, c.version, c.state, c.loading, c.plan is None)
+        if key != self._planned_key:
+            self._planned_key = key
+            self._show_selection_text()
+        if idle and c.pending is not None:
+            self._sync_selection_combos()
+
+    def _sync_selection_combos(self):
+        """Programmatic display of the pending values (never an edit)."""
+        c = self.controller
+        req = c.pending.requested
+        for name, combo in self._sel_combos.items():
+            i = combo.findData(req[name]) if req.get(name) else -1
+            if combo.currentIndex() != i:
+                with QtCore.QSignalBlocker(combo):
+                    combo.setCurrentIndex(i)
+        obj, t = req.get("object_id"), c.planned_trial()
+        posture = t["posture_id"] if t else (default_posture(obj)[0] if obj else "")
+        if self.posture_combo.currentText() != posture:
+            with QtCore.QSignalBlocker(self.posture_combo):
+                self.posture_combo.setCurrentText(posture)
+        if obj != self._posture_obj:             # posture follows the object (fist / grasp)
+            self._posture_obj = obj
+            self.posture_desc.setText(default_posture(obj)[1] if obj else "")
+
+    def _trial_lines(self, tid, values: dict, posture: str, v1: bool) -> str:
+        c = self.controller
+        obj, tgt, motion = (values.get(f) for f in ("object_id", "target_label",
+                                                     "motion_condition"))
+        name = c.object_name(obj) if obj else ""
+        name = name if len(name) <= 22 else name[:21] + "…"
+        head = f"<b>{tid}</b> of {c.plan.total}" if tid else "<b>no match</b>"
+        return (f"Next: {head} · <b>{TARGETS[tgt]['display'] if tgt in TARGETS else '--'}</b>"
+                f" · {posture or '--'}<br>{obj or '--'}{f' ({name})' if obj else ''}<br>"
+                f"Movement: <b>{MOTION_SHORT.get(motion, '--')}</b>"
+                + (" (plan v1: no movement)" if v1 else ""))
+
+    def _show_selection_text(self):
+        c = self.controller
+        p, idle = c.pending, c.state == IDLE
+        state, note, color = "", "", "#546e7a"
         if c.loading:
-            self.next_label.setText("Next: loading…")
+            text = "Next: loading…"
         elif c.plan is None:
-            self.next_label.setText("Next: no plan yet.<br>Enter a participant, then New…")
-        elif t is None and c.progress is not None and c.progress.remaining:
-            self.next_label.setText("Next: <b>none</b> for the ticked objects<br>"
-                                    f"{c.progress.remaining} trials need other objects")
-        elif t is None:
-            self.next_label.setText(f"Next: <b>plan complete</b> ({c.plan.total} trials)")
+            text = "Next: no plan yet.<br>Enter a participant, then New…"
+        elif idle and p is not None and p.edited:
+            t = c.planned_trial()
+            obj = p.requested.get("object_id")
+            posture = t["posture_id"] if t else (default_posture(obj)[0] if obj else "")
+            diff = c.differing_fields()
+            auto = c.plan.trials[p.proposal] if p.proposal is not None else None
+            text = self._trial_lines(t["trial_id"] if t else None, p.requested, posture,
+                                     c.plan.motions is None)
+            text += "<br><small>" + (
+                ("changed: " + ", ".join(FIELD_NAMES[f] for f in diff)) if diff and auto
+                else "same values as the proposal" if auto else "no automatic proposal") + (
+                f" · auto {auto['trial_id']}" if auto else "") + "</small>"
+            state = "<b style='color:#ef6c00'>Edited</b> (this trial only)"
+            parts = ([p.problem] if p.problem else []) + list(p.warnings)
+            if auto:
+                parts.append(f"Automatic proposal: {auto['trial_id']} "
+                             f"{describe(trial_values(c.plan, auto))}.")
+                if obj and default_posture(obj)[0] != auto["posture_id"]:
+                    parts.append(f"Posture {default_posture(obj)[0]} follows {obj}.")
+            note = "\n".join(parts)
+            color = "#c62828" if p.problem else "#ef6c00" if p.warnings else color
         else:
-            name = c.object_name(t["object_id"])
-            name = name if len(name) <= 22 else name[:21] + "…"
-            motion = c.plan.motion_of(t)
-            v1 = " (plan v1: no movement)" if "motion_condition" not in t else ""
-            self.next_label.setText(
-                f"Next: <b>{t['trial_id']}</b> of {c.plan.total} · "
-                f"<b>{TARGETS[t['target_label']]['display']}</b> · {t['posture_id']}<br>"
-                f"{t['object_id']} ({name})<br>Movement: <b>{MOTION_SHORT[motion]}</b>{v1}"
-                + (f"<br><small>random pick of {c.selection['eligible']} eligible</small>"
-                   if c.selection else ""))
-            if c.state == IDLE and t["trial_id"] != self._planned_shown:
-                self._planned_shown = t["trial_id"]
-                self.motion_combo.setCurrentIndex(self.motion_combo.findData(motion))
-                with QtCore.QSignalBlocker(self.object_combo):
-                    self.object_combo.setCurrentIndex(self.object_combo.findData(t["object_id"]))
-                self.target_combo.setCurrentIndex(self.target_combo.findData(t["target_label"]))
-                self.posture_combo.setCurrentText(t["posture_id"])
-                self.posture_desc.setText(default_posture(t["object_id"])[1])
+            t = c.planned_trial() if idle else (c.spec.planned_trial if c.spec else None)
+            sel = (p.proposal_selection if p is not None else None) if idle else c.attempt_selection
+            if t is None and c.progress is not None and c.progress.remaining:
+                text = ("Next: <b>none</b> for the ticked objects<br>"
+                        f"{c.progress.remaining} trials need other objects")
+            elif t is None:
+                text = f"Next: <b>plan complete</b> ({c.plan.total} trials)"
+            elif sel and sel.get("mode") == MANUAL_OVERRIDE:          # running an edited trial
+                text = self._trial_lines(t["trial_id"], trial_values(c.plan, t), t["posture_id"],
+                                         "motion_condition" not in t)
+                text += "<br><small>edited: " + ", ".join(
+                    FIELD_NAMES[f] for f in sel["differing_fields"] or sel["edited_fields"]) + \
+                    "</small>"
+                state = "<b style='color:#ef6c00'>Edited</b>"
+                note = "\n".join(
+                    ([AVAILABILITY_BYPASS_TEXT] if sel["availability_bypass"] else []) +
+                    (["Target run preference bypassed."] if sel["ordering_preference_bypass"]
+                     else []))
+            else:
+                text = self._trial_lines(t["trial_id"], trial_values(c.plan, t), t["posture_id"],
+                                         "motion_condition" not in t)
+                if sel:
+                    text += f"<br><small>random pick of {sel['eligible']} eligible</small>"
+                state = "<b style='color:#2e7d32'>Automatic</b> (random)" if sel else ""
+        self.next_label.setText(text)
+        self.sel_state.setText(state)
+        self.sel_note.setText(note)
+        css = f"color:{color};"
+        if self.sel_note.styleSheet() != css:
+            self.sel_note.setStyleSheet(css)
+        if self.sel_note.isVisibleTo(self) != bool(note):
+            self.sel_note.setVisible(bool(note))
 
     def _show_phase(self):
         c = self.controller
         m = c.machine
         spec = c.spec if c.spec and c.state != IDLE else self.spec()
-        target = spec.target_label if spec.target_label in TARGETS else "low"
+        known = spec.target_label in TARGETS
+        target = spec.target_label if known else "low"
         motion = spec.motion_condition if spec.motion_condition in MOTIONS else STATIONARY
         info = TARGETS[target]
-        tgt_text = (f"Target: {info['display']} (s = {info['s']:g})<br>"
-                    f"<span style='font-weight:normal'>Movement: {MOTION_SHORT[motion]}</span>")
+        tgt_text = ((f"Target: {info['display']} (s = {info['s']:g})" if known else "Target: --")
+                    + "<br><span style='font-weight:normal'>Movement: "
+                    f"{MOTION_SHORT.get(spec.motion_condition, '--')}</span>")
         color, fg = "#eceff1", "#263238"
         if c.state == RUNNING and m is not None:
             phase = m.phase
@@ -706,7 +858,7 @@ class StiffnessCollectionPanel(QtWidgets.QWidget):
             if ready:
                 color, fg = "#c8e6c9", "#1b5e20"
             instr = ("Rest between trials as long as needed; start when the participant is "
-                     f"ready.<br><i>Operator: {OPERATOR_NOTES[target]}</i>")
+                     "ready." + (f"<br><i>Operator: {OPERATOR_NOTES[target]}</i>" if known else ""))
             st = c.settings
             times = (f"{st.total_s:g} s trial: PREPARE {st.prepare_s:g} · SETTLE {st.settle_s:g}"
                      f" · HOLD {st.hold_s:g} · REST {st.rest_s:g} s")
@@ -735,10 +887,14 @@ class StiffnessCollectionPanel(QtWidgets.QWidget):
             cb.setEnabled(idle and plan_mode)
         self.btn_new_plan.setEnabled(idle and plan_mode and c.participant_id is not None
                                      and not c.loading)
-        for w in (self.object_combo, self.target_combo, self.motion_combo, self.role_combo,
-                  self.trial_spin):
+        # Plan mode: editable for the next trial only (role, trial ID, posture follow the plan)
+        editable = not plan_mode or (c.pending is not None and not c.loading)
+        for w in self._sel_combos.values():
+            w.setEnabled(idle and editable)
+        for w in (self.role_combo, self.trial_spin, self.posture_combo):
             w.setEnabled(idle and not plan_mode)
-        self.posture_combo.setEnabled(idle and not plan_mode)
+        self.btn_reset_sel.setEnabled(idle and plan_mode and c.pending is not None
+                                      and bool(c.pending.edited))
         blockers = self.start_blockers() if idle else []
         self.btn_start.setEnabled(idle and not blockers)
         self.btn_abort.setEnabled(c.state == RUNNING)
