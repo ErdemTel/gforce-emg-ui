@@ -6,6 +6,8 @@ Only HOLD is a training-candidate interval. Phase and target are separate:
 a REST interval is never "low", whatever the trial's target. Each trial also has
 one motion condition; in moving trials the movement starts in SETTLE and continues
 through HOLD, so HOLD means "maintain the effort", not "stay still".
+Surface-press trials (index fingertip on a desk) use their own texts and are
+always stationary; grasp / empty-hand texts are unchanged.
 
 Labels are INSTRUCTED EFFORT / INTENDED ROBOT GAIN levels. They are not measured
 physical human stiffness, force, %MVC or verified antagonist co-contraction.
@@ -74,6 +76,41 @@ MOTIONS = {
 MOTION_ORDER = (STATIONARY, "wrist_flex_ext", "forearm_rotation", "reach_sweep")
 MOVEMENT_PHASES = (SETTLE, HOLD)
 
+# Trial types (task conditions). Grasp = object grasp or empty-hand fist (texts above).
+# Surface press: index fingertip pressed on a desk, always stationary.
+GRASP, SURFACE_PRESS = "grasp", "surface_press"
+SURFACE_PRESS_NAME = "Surface Press (Desk)"
+SURFACE_PRESS_POSTURE = "index_finger_press"
+TASK_INSTRUCTION_VERSIONS = {GRASP: "grasp/1", SURFACE_PRESS: "surface-press/1"}
+SURFACE_TARGET_INSTRUCTIONS = {
+    "low": "Maintain light fingertip contact with the surface without intentionally adding "
+           "downward pressure. Keep your finger and wrist posture steady.",
+    "medium": "Apply a comfortable, repeatable moderate press against the surface. Maintain the "
+              "same fingertip position, finger posture, and wrist position.",
+    "high": "Apply a firm, comfortable, repeatable press against the surface without changing "
+            "finger posture. Do not push maximally or lean your body weight onto the finger.",
+}
+SURFACE_PHASE_TEXT = {
+    PREPARE: "Place your index fingertip lightly against the marked area of the desk. Keep a "
+             "comfortable slight bend in the finger, maintain a consistent wrist position, and "
+             "support your forearm without compressing the armband. Avoid leaning your body "
+             "weight onto the finger.",
+    SETTLE: "Gradually establish the instructed pressing effort.",
+    HOLD: "Maintain the instructed pressing effort and keep the finger, wrist, and arm posture "
+          "as steady as possible.",
+    REST: "Release the pressing effort and allow your hand and forearm to rest.",
+    ABORTED: "Trial stopped. Release the pressing effort and allow your hand and forearm to rest.",
+}
+SURFACE_OPERATOR_NOTES = {
+    "low": "s=0 keeps light fingertip contact: the finger stays on the desk.",
+    "medium": "Medium is NOT a measured 50% of force, EMG, MVC or human stiffness.",
+    "high": "Strong but comfortable press: never maximal, no body weight on the finger.",
+}
+
+
+def trial_type(object_id: str) -> str:
+    return SURFACE_PRESS if object_id == SURFACE_PRESS else GRASP
+
 # Marker labels written to markers.csv (stable, machine-readable)
 MARKERS = ("PREPARE_START", "SETTLE_START", "HOLD_START", "HOLD_END", "REST_START",
            "REST_END", "REST_EXTENDED", "ABORT", "TRIAL_END")
@@ -93,7 +130,12 @@ def motion_info(motion: str) -> dict:
             "movement_phases": [] if m["movement"] is None else list(MOVEMENT_PHASES)}
 
 
-def phase_instruction(phase: str, target: str, motion: str = STATIONARY) -> str:
+def phase_instruction(phase: str, target: str, motion: str = STATIONARY,
+                      task: str = GRASP) -> str:
+    if task == SURFACE_PRESS:                 # stationary only: motion is not used
+        if phase == SETTLE:
+            return f"{SURFACE_PHASE_TEXT[SETTLE]} {SURFACE_TARGET_INSTRUCTIONS[target]}"
+        return SURFACE_PHASE_TEXT.get(phase, "")
     level = TARGETS[target]["display"]
     move = MOTIONS[motion]["movement"]
     if phase == PREPARE:
@@ -121,9 +163,19 @@ def phase_instruction(phase: str, target: str, motion: str = STATIONARY) -> str:
     return ""
 
 
-def participant_instructions(target: str, motion: str = STATIONARY) -> dict:
+def participant_instructions(target: str, motion: str = STATIONARY, task: str = GRASP) -> dict:
     """Exact text shown in each phase, saved with the trial."""
-    return {p: phase_instruction(p, target, motion) for p in PHASES + (ABORTED,)}
+    return {p: phase_instruction(p, target, motion, task) for p in PHASES + (ABORTED,)}
+
+
+def task_instructions(target: str, motion: str = STATIONARY, task: str = GRASP) -> dict:
+    """Instruction fields saved in trial.json `label` (one source for UI and metadata)."""
+    surface = task == SURFACE_PRESS
+    return {"target_instruction": (SURFACE_TARGET_INSTRUCTIONS if surface
+                                   else TARGET_INSTRUCTIONS)[target],
+            "participant_instructions": participant_instructions(target, motion, task),
+            "operator_note": (SURFACE_OPERATOR_NOTES if surface else OPERATOR_NOTES)[target],
+            "task_instruction_version": TASK_INSTRUCTION_VERSIONS[task]}
 
 
 @dataclass

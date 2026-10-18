@@ -18,8 +18,19 @@ Recorded trials without motion_condition keep it unknown (None).
 The next trial is drawn at random (pick_trial). One-trial edits of its object,
 target or movement are resolved to an existing incomplete planned trial with
 exactly those values (resolve_request); the plan itself is never changed.
+
+Surface press (task condition, not an object) is added to an existing standard
+200-trial v2 plan only by an explicit, one-time extension (extend_plan_file):
+30 stationary trials appended (10 per target), same plan_id, original trials
+unchanged, backup kept, file replaced atomically. Extended plans are schema 3,
+so older app versions refuse them instead of instructing a grasp. Surface press
+is opt-in for the random selection (ticked like an object).
 """
 
+import collections
+import copy
+import hashlib
+import json
 import random
 import uuid
 from dataclasses import dataclass, field
@@ -27,8 +38,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
 
-from .protocol import MOTION_INSTRUCTION_VERSION, MOTION_ORDER, MOTIONS, STATIONARY, TARGET_ORDER
-from .storage import read_json, valid_key
+from .protocol import (GRASP, MOTION_INSTRUCTION_VERSION, MOTION_ORDER, MOTIONS, STATIONARY,
+                       SURFACE_PRESS, SURFACE_PRESS_NAME, SURFACE_PRESS_POSTURE, TARGET_ORDER,
+                       TASK_INSTRUCTION_VERSIONS)
+from .storage import atomic_write_text, dumps, read_json, valid_key
 
 EMPTY_HAND = "empty_hand"
 DEFAULT_OBJECTS = (
@@ -36,7 +49,11 @@ DEFAULT_OBJECTS = (
     ("obj01", "Object 1"), ("obj02", "Object 2"), ("obj03", "Object 3"),
     ("obj04", "Object 4"), ("obj05", "Object 5"),
 )
-DEFAULT_POSTURES = {EMPTY_HAND: ("fist", "Closed fist, no object")}
+DEFAULT_POSTURES = {EMPTY_HAND: ("fist", "Closed fist, no object"),
+                    SURFACE_PRESS: (SURFACE_PRESS_POSTURE, "Index fingertip pressed on the desk")}
+# Task conditions: not objects, outside the movement split, stationary only, and
+# eligible for the random pick only when ticked (opt-in)
+TASK_CONDITIONS = {SURFACE_PRESS: SURFACE_PRESS_NAME}
 OBJECT_POSTURE = ("grasp", "Grasp the object")
 OBJECTS_FILE = "objects.json"
 
@@ -56,6 +73,13 @@ PLAN_GENERATOR = "weighted-random-order/no-target-run-over-2/v1"
 PLAN_GENERATOR_V2 = "weighted-random-order/no-target-run-over-2/motion-split/v2"
 PLAN_SCHEMA = "gforce_emg_ui.stiffness_plan"
 SIMULATED_DIR = "simulated"
+STANDARD_TOTAL = 200
+
+SURFACE_PRESS_EXTENSION = "surface_press/v1"
+SURFACE_PRESS_COUNTS = (10, 10, 10)
+EXTENSION_GENERATOR = "weighted-random-order/no-target-run-over-2/surface-press/v1"
+PLAN_BACKUP_DIR = "plan_backups"          # not plan_*.json: never loaded as a plan
+EXTENDABLE, EXTENDED, INCOMPATIBLE = "extendable", "extended", "incompatible"
 
 
 def default_posture(object_id: str) -> Tuple[str, str]:
@@ -151,6 +175,7 @@ class TrialPlan:
     counts: Dict[str, Tuple[int, int, int]]
     trials: List[dict] = field(default_factory=list)
     motions: Optional[Tuple[str, ...]] = None   # None: v1 plan (no motion assigned)
+    extensions: List[dict] = field(default_factory=list)   # v3: appended task trials
 
     @classmethod
     def create(cls, participant_id: str, data_source: str, seed: Optional[int] = None,
@@ -172,7 +197,7 @@ class TrialPlan:
 
     @property
     def schema_version(self) -> int:
-        return 1 if self.motions is None else 2
+        return 1 if self.motions is None else 3 if self.extensions else 2
 
     def motion_of(self, trial: dict) -> str:
         """Motion to instruct for a planned trial (v1 plans: stationary)."""
@@ -200,11 +225,18 @@ class TrialPlan:
              "max_target_run": MAX_TARGET_RUN, "created": self.created,
              "counts_low_medium_high": {k: list(v) for k, v in self.counts.items()}}
         if self.motions is not None:
-            split = motion_split(self.counts, self.motions)
+            split = motion_split({k: v for k, v in self.counts.items()
+                                  if k not in TASK_CONDITIONS}, self.motions)
+            for obj in set(self.counts) & set(TASK_CONDITIONS):     # stationary only
+                for i, t in enumerate(TARGET_ORDER):
+                    for m in self.motions:
+                        split[(obj, t, m)] = self.counts[obj][i] if m == STATIONARY else 0
             d["motion_conditions"] = list(self.motions)
             d["motion_instruction_version"] = MOTION_INSTRUCTION_VERSION
             d["motion_counts"] = {obj: {t: {m: split[(obj, t, m)] for m in self.motions}
                                         for t in TARGET_ORDER} for obj in self.counts}
+        if self.extensions:
+            d["extensions"] = self.extensions
         d.update(total=self.total, trials=self.trials)
         return d
 
@@ -213,18 +245,170 @@ class TrialPlan:
         if d.get("schema") != PLAN_SCHEMA:
             raise ValueError("not a stiffness plan file")
         version = d.get("schema_version", 1)
-        if version not in (1, 2):
+        if version not in (1, 2, 3):
             raise ValueError(f"unsupported plan schema_version {version}")
-        motions = None
-        if version == 2:
+        motions, extensions = None, []
+        if version >= 2:
             motions = tuple(d["motion_conditions"])
             unknown = {t.get("motion_condition") for t in d["trials"]} - set(MOTIONS)
             if set(motions) - set(MOTIONS) or unknown:
                 raise ValueError(f"unknown motion condition(s) in plan: {sorted(map(str, unknown))}")
+        if version == 3:
+            extensions = list(d.get("extensions") or [])
+            if not extensions:
+                raise ValueError("plan schema_version 3 without extensions")
+            if any(t["object_id"] in TASK_CONDITIONS and t.get("motion_condition") != STATIONARY
+                   for t in d["trials"]):
+                raise ValueError("surface press trials must be stationary")
         return cls(plan_id=d["plan_id"], participant_id=d["participant_id"],
                    data_source=d["data_source"], seed=int(d["seed"]), created=d["created"],
                    counts={k: tuple(v) for k, v in d["counts_low_medium_high"].items()},
-                   trials=list(d["trials"]), motions=motions)
+                   trials=list(d["trials"]), motions=motions, extensions=extensions)
+
+
+# -- surface-press extension of an existing plan ------------------------------------
+
+def surface_press_status(plan: TrialPlan) -> Tuple[str, str]:
+    """(extendable | extended | incompatible, explanation). Only an unmodified standard
+    200-trial v2 plan (default counts, the four movements) may be extended."""
+    if any(e.get("id") == SURFACE_PRESS_EXTENSION for e in plan.extensions):
+        return EXTENDED, (f"Plan {plan.plan_id} already has its 30 Surface Press trials "
+                          f"({plan.total} planned trials). Nothing was added.")
+    why = []
+    if plan.motions is None:
+        why.append("plan v1 (no movement assigned)")
+    elif tuple(plan.motions) != PLAN_MOTIONS:
+        why.append(f"movements {list(plan.motions)} are not the standard four")
+    if plan.extensions:
+        why.append("plan already has other extensions")
+    if plan.counts != {k: tuple(v) for k, v in DEFAULT_PLAN_COUNTS.items()}:
+        why.append("condition counts are not the standard 200-trial counts")
+    if plan.total != STANDARD_TOTAL:
+        why.append(f"{plan.total} planned trials, not {STANDARD_TOTAL}")
+    cells = collections.Counter((t["object_id"], t["target_label"]) for t in plan.trials)
+    if cells != collections.Counter({(o, t): c[i] for o, c in plan.counts.items()
+                                     for i, t in enumerate(TARGET_ORDER) if c[i]}):
+        why.append("trials do not match the plan's condition counts")
+    if len({t["trial_id"] for t in plan.trials}) != plan.total or \
+            len({t["index"] for t in plan.trials}) != plan.total:
+        why.append("duplicate trial IDs or indices")
+    if why:
+        return INCOMPATIBLE, (f"Plan {plan.plan_id} is not a standard 200-trial plan ("
+                              + "; ".join(why) + "). Nothing was changed.")
+    return EXTENDABLE, ""
+
+
+def _free_trial_ids(plan: TrialPlan, n: int) -> List[Tuple[int, str]]:
+    """(index, trial_id) pairs after the last index; IDs already used are skipped."""
+    used = {t["trial_id"] for t in plan.trials}
+    i = max((t["index"] for t in plan.trials), default=0)
+    k, out = i, []
+    while len(out) < n:
+        k += 1
+        if f"t{k:03d}" not in used:
+            out.append((i + len(out) + 1, f"t{k:03d}"))
+    return out
+
+
+def extend_with_surface_press(plan: TrialPlan, seed: Optional[int] = None,
+                              added: Optional[str] = None, **record) -> TrialPlan:
+    """New TrialPlan = plan + 30 stationary surface-press trials (pure; plan unchanged)."""
+    status, why = surface_press_status(plan)
+    if status != EXTENDABLE:
+        raise ValueError(why)
+    if seed is None:                         # reproducible from the plan seed, and saved
+        seed = random.Random(f"{plan.seed}:{SURFACE_PRESS_EXTENSION}").randrange(1, 2 ** 31)
+    cells = {(SURFACE_PRESS, t, STATIONARY): n for t, n in zip(TARGET_ORDER, SURFACE_PRESS_COUNTS)}
+    order = _weighted_order(cells, int(seed), MAX_TARGET_RUN)
+    new = [{"index": i, "trial_id": tid, "object_id": SURFACE_PRESS,
+            "posture_id": SURFACE_PRESS_POSTURE, "target_label": tgt,
+            "motion_condition": STATIONARY, "trial_type": SURFACE_PRESS}
+           for (i, tid), (_, tgt, _) in zip(_free_trial_ids(plan, len(order)), order)]
+    ext = {"id": SURFACE_PRESS_EXTENSION, "condition": SURFACE_PRESS, "display": SURFACE_PRESS_NAME,
+           "trial_type": SURFACE_PRESS, "posture_id": SURFACE_PRESS_POSTURE,
+           "motion_condition": STATIONARY,
+           "task_instruction_version": TASK_INSTRUCTION_VERSIONS[SURFACE_PRESS],
+           "counts_low_medium_high": list(SURFACE_PRESS_COUNTS), "seed": int(seed),
+           "generator": EXTENSION_GENERATOR, "max_target_run": MAX_TARGET_RUN,
+           "added": added or datetime.now().isoformat(timespec="seconds"),
+           "total_before": plan.total, "total_after": plan.total + len(new),
+           "added_trial_ids": [t["trial_id"] for t in new], **record}
+    return TrialPlan(plan_id=plan.plan_id, participant_id=plan.participant_id,
+                     data_source=plan.data_source, seed=plan.seed, created=plan.created,
+                     counts={**plan.counts, SURFACE_PRESS: SURFACE_PRESS_COUNTS},
+                     trials=copy.deepcopy(plan.trials) + new, motions=plan.motions,
+                     extensions=copy.deepcopy(plan.extensions) + [ext])
+
+
+def extension_problems(original: TrialPlan, extended: TrialPlan) -> List[str]:
+    """Checks of a complete extended plan before it is written (empty = valid)."""
+    p, n = [], original.total
+    for k in ("plan_id", "participant_id", "data_source", "seed", "created", "motions"):
+        if getattr(original, k) != getattr(extended, k):
+            p.append(f"{k} changed")
+    if [dumps(t) for t in extended.trials[:n]] != [dumps(t) for t in original.trials]:
+        p.append("original trials changed")
+    added = extended.trials[n:]
+    if len(added) != sum(SURFACE_PRESS_COUNTS):
+        p.append(f"{len(added)} trials added, not {sum(SURFACE_PRESS_COUNTS)}")
+    if collections.Counter(t["target_label"] for t in added) != \
+            dict(zip(TARGET_ORDER, SURFACE_PRESS_COUNTS)):
+        p.append("added trials are not 10 low / 10 medium / 10 high")
+    if any((t["object_id"], t["posture_id"], t["motion_condition"], t.get("trial_type")) !=
+           (SURFACE_PRESS, SURFACE_PRESS_POSTURE, STATIONARY, SURFACE_PRESS) for t in added):
+        p.append("added trials are not stationary surface press")
+    if len({t["trial_id"] for t in extended.trials}) != extended.total or \
+            len({t["index"] for t in extended.trials}) != extended.total:
+        p.append("duplicate trial IDs or indices")
+    cells = collections.Counter((t["object_id"], t["target_label"]) for t in extended.trials)
+    if any(cells[(o, t)] != c[i] for o, c in extended.counts.items()
+           for i, t in enumerate(TARGET_ORDER)):
+        p.append("condition counts do not match the trials")
+    d = extended.to_dict()
+    if d["total"] != n + len(added) or TrialPlan.from_dict(json.loads(dumps(d))).to_dict() != \
+            json.loads(dumps(d)):
+        p.append("extended plan does not round-trip")
+    return p
+
+
+def extend_plan_file(path: Path, expected: TrialPlan, seed: Optional[int] = None) -> TrialPlan:
+    """Extend the saved plan file in place (I/O thread). Transactional: the file must
+    still equal the loaded plan; the complete new plan is validated, the original is
+    copied to plan_backups/ (verified), then replaced atomically and read back. Any
+    failure before the replace leaves the original file untouched; a bad read-back
+    restores it. Raises ValueError (refused) or OSError (I/O)."""
+    path = Path(path)
+    raw = path.read_bytes()
+    if json.loads(raw) != json.loads(dumps(expected.to_dict())):
+        raise ValueError(f"{path.name} differs from the loaded plan: reload the participant "
+                         "and try again. Nothing was changed.")
+    original = TrialPlan.from_dict(json.loads(raw))
+    status, why = surface_press_status(original)
+    if status != EXTENDABLE:
+        raise ValueError(why)
+    backups = path.parent / PLAN_BACKUP_DIR
+    backup = backups / f"{path.stem}.before-surface-press.json"
+    if backup.exists() and backup.read_bytes() != raw:
+        backup = backups / f"{path.stem}.before-surface-press.{uuid.uuid4().hex[:8]}.json"
+    sha = hashlib.sha256(raw).hexdigest()
+    extended = extend_with_surface_press(
+        original, seed, original_sha256=sha,
+        backup=f"{PLAN_BACKUP_DIR}/{backup.name}")
+    problems = extension_problems(original, extended)
+    if problems:
+        raise ValueError("Extended plan failed validation (" + "; ".join(problems) +
+                         "). Nothing was changed.")
+    text = dumps(extended.to_dict())
+    backups.mkdir(exist_ok=True)
+    if not backup.exists():
+        atomic_write_text(backup, raw.decode())
+    if hashlib.sha256(backup.read_bytes()).hexdigest() != sha:
+        raise OSError(f"backup {backup} could not be verified; plan not changed")
+    atomic_write_text(path, text)
+    if path.read_bytes() != text.encode():
+        atomic_write_text(path, raw.decode())
+        raise OSError(f"{path.name} read back differently; original restored")
+    return extended
 
 
 # -- attempts on disk ------------------------------------------------------------
@@ -293,6 +477,7 @@ def counts_toward_plan(rec: dict, plan: TrialPlan) -> bool:
             and rec.get("participant_id") == plan.participant_id
             and rec.get("dataset_role") == "development"
             and cond.get("object_id") == planned["object_id"]
+            and cond.get("trial_type", GRASP) == planned.get("trial_type", GRASP)
             and label.get("target_label") == planned["target_label"]
             and (rec.get("training_candidate") or {}).get("quality_status") == "clean"
             and attempt_category(rec) == "accepted")
@@ -309,7 +494,7 @@ class Progress:
     unreviewed: int = 0
     in_progress: int = 0
     by_cell: Dict[Tuple[str, str], List[int]] = field(default_factory=dict)  # [accepted, planned]
-    by_motion: Dict[str, List[int]] = field(default_factory=dict)            # v2 plans only
+    by_motion: Dict[str, List[int]] = field(default_factory=dict)            # v2+, grasp only
     completed: Dict[str, str] = field(default_factory=dict)                  # trial_id -> attempt
     attempts_by_trial: Dict[str, int] = field(default_factory=dict)
 
@@ -322,7 +507,7 @@ def compute_progress(plan: TrialPlan, records: Dict[str, dict], live: Iterable[s
             pr.by_cell[(obj, tgt)] = [0, c[i]]
     pr.by_motion = {m: [0, 0] for m in plan.motions or ()}
     for t in plan.trials:
-        if "motion_condition" in t:
+        if "motion_condition" in t and t["object_id"] not in TASK_CONDITIONS:
             pr.by_motion.setdefault(t["motion_condition"], [0, 0])[1] += 1
     mine = [r for r in records.values() if r.get("plan_id") == plan.plan_id
             and r.get("data_source") == plan.data_source]
@@ -337,7 +522,7 @@ def compute_progress(plan: TrialPlan, records: Dict[str, dict], live: Iterable[s
                 pr.completed[tid] = rec["attempt_id"]
                 planned = plan.trial(tid)
                 pr.by_cell[(planned["object_id"], planned["target_label"])][0] += 1
-                if "motion_condition" in planned:
+                if "motion_condition" in planned and planned["object_id"] not in TASK_CONDITIONS:
                     pr.by_motion[planned["motion_condition"]][0] += 1
         elif cat == "rejected":
             pr.rejected += 1
@@ -423,9 +608,15 @@ def resolve_request(plan: TrialPlan, progress: Progress, request: dict,
     missing = [FIELD_NAMES[f] for f in SELECTION_FIELDS if not request.get(f)]
     if missing:
         return None, "", f"Choose {' and '.join(missing)}."
+    if request["object_id"] == SURFACE_PRESS and SURFACE_PRESS not in plan.counts:
+        return None, "", ("This plan has no Surface Press trials: add them under Protocol & "
+                          "plan settings, choose another object, or reset edits.")
     if request["object_id"] not in plan.counts:
         return None, "", (f"{request['object_id']} has no trials in this plan. Choose another "
                           "object, reset edits, or use Manual mode for off-plan objects.")
+    if request["object_id"] in TASK_CONDITIONS and request["motion_condition"] != STATIONARY:
+        return None, "", ("Surface Press is stationary only: choose Stationary, another "
+                          "object, or reset edits.")
     if plan.motions is None and request["motion_condition"] != V1_PLAN_MOTION:
         return None, "", "Plan v1 has no movement: choose Stationary or reset edits."
     want = {f: request[f] for f in SELECTION_FIELDS}
@@ -473,7 +664,7 @@ def merge_objects(saved: Optional[Iterable]) -> List[Tuple[str, str]]:
             oid, name = str(item[0]), str(item[1]).strip()
         except (TypeError, IndexError):
             continue
-        if not valid_key(oid):
+        if not valid_key(oid) or oid in TASK_CONDITIONS:   # conditions are not objects
             continue
         if oid in names:
             names[oid] = name or names[oid]

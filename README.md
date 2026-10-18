@@ -153,8 +153,9 @@ amplitude are never checked: contact (even red) is only recorded in `trial.json`
 reset, recorder or trial.json error, phase overrun > 1 s, manual Stop, Disconnect, closing
 the app. Lost/invalid samples and gaps during HOLD flag it; flagged HOLDs cannot be accepted.
 
-**Plan** (*Mode → Plan*, *New…*): 200 accepted development trials per participant, seeded
-order, no target run > 2, saved before the first trial, resumed in later sessions. Each
+**Plan** (*Mode → Plan*, *New…*): 200 accepted development trials per participant (230 after
+adding Surface Press, below), seeded order, no target run > 2, saved before the first trial,
+resumed in later sessions. Each
 condition × target cell is split over the four movements (≥ 2 each; 50 per movement).
 Older plan files without movement are used unchanged; their trials are recorded stationary.
 
@@ -182,12 +183,49 @@ obj02 gives e.g. `t017 obj02 / medium / reach_sweep`.
 
 `trial.json` `selection.mode`: `automatic` (missing in older files) or `manual_override`, with
 `rule`, `automatic_proposal` (trial, values, how it was drawn), `edited_fields`,
-`differing_fields`, `requested`, `resolved`, `available_objects`, `availability_bypass`,
-`ordering_preference_bypass`, `recent_targets`, `repeat`. Schema / protocol versions unchanged.
+`differing_fields`, `enforced_fields`, `requested`, `resolved`, `available_objects`,
+`availability_bypass`, `ordering_preference_bypass`, `recent_targets`, `repeat`.
+Schema / protocol versions unchanged.
+
+### Surface Press
+
+Task condition `surface_press` (*Surface Press (Desk)*): the index fingertip presses on a
+desk, always stationary, posture `index_finger_press`. Same protocol, recorder, labels
+(low/medium/high = s 0/0.5/1, instructed effort, not measured force) and review as the
+grasp trials; only the instructions differ:
+
+| phase / target | instruction (shown and saved in `trial.json`) |
+|---|---|
+| PREPARE | fingertip lightly on the marked area, slight finger bend, steady wrist, forearm supported without pressing the armband, no body weight on the finger |
+| LOW | light contact, no intentional downward pressure |
+| MEDIUM | comfortable, repeatable moderate press, same finger and wrist position |
+| HIGH | firm, comfortable, repeatable press; not maximal, no body weight |
+| SETTLE / HOLD / REST | establish / keep / release the pressing effort |
+
+**Add the trials to an existing plan** (once): select the plan → *Protocol & plan settings* →
+**Add 30 Surface Press Trials** → confirm (shows plan ID and 200 → 230). Appends 10 low,
+10 medium, 10 high (`t201`–`t230`, or the next free IDs), seeded order. The plan ID, the
+first 200 trials, accepted recordings and progress stay as they are. The old file is copied
+to `plan_backups/` first, then replaced atomically; a failed write leaves it unchanged.
+A second click only says the plan is already extended; non-standard plans are refused.
+Extended plans are `schema_version` 3, so older app versions refuse to load them.
+
+**Record:** tick **Surface Press (Desk)** under *Available objects* to let the random pick
+choose remaining surface-press trials (unticked: they stay in the plan, not picked).
+Or set *Object* to `surface_press` for the next trial: the target is kept and the movement
+is set to stationary (another movement is refused). Changing only the target of a proposed
+surface-press trial keeps the condition. Progress shows
+`Surface Press: LOW x/10 · MEDIUM y/10 · HIGH z/10 · total n/30` (accepted only).
+
+`trial.json` adds `condition.trial_type` (`surface_press` or `grasp`) and
+`label.task_instruction_version` (`surface-press/1`, `grasp/1`); raw CSVs are unchanged.
+The classifier (`emg-stiffness-data`) reads these trials and does not filter by object:
+accepted presses train with the grasps under the same LOW/MEDIUM/HIGH labels.
 
 ```
 <data-dir>/stiffness_collection/P01/
   plan_plan-1a2b3c4d.json
+  plan_backups/plan_plan-1a2b3c4d.before-surface-press.json
   S01/20261015_134056_obj05_medium_s0p5_t001_a01_f889bbb8/
     emg.csv imu.csv contact.csv markers.csv session.json trial.json
 <data-dir>/stiffness_collection/simulated/...      simulator data, never real
@@ -201,6 +239,24 @@ receipt time: trim boundaries when processing).
 **First hardware session:** check rate/filters, run a few practice trials per target,
 inspect their `emg.csv` / `markers.csv` / `trial.json`, confirm no false stale aborts with
 the 0.5 s limit, then start the plan.
+
+## Research data in git
+
+`data/` (recordings, `stiffness_collection/`, plans, backups, `trial.json`, CSVs, binary
+recordings) is no longer git-ignored; credentials, `.env`, venvs, logs, `live_logs/` and
+models stay ignored. Un-ignoring uploads nothing: add data explicitly.
+
+```bash
+GH_CONFIG_DIR=~/erdem/.config/gh gh repo view --json visibility   # must be PRIVATE
+git status --short data/
+git add data/stiffness_collection/<P>/   # review first; never `git add .`
+git commit -m "Add <P> trials" && git push
+```
+
+Private is not anonymous: participant IDs (folder names, `trial.json`) and the band's MAC
+address (`session.json`) are in the files. Size: ~2.6 MB per trial (~0.5 MB compressed),
+largest file 11 MB; 230 trials ≈ 0.6 GB raw. Plain git is fine at this size; consider
+Git LFS if single files approach 50 MB or the repo grows to several GB.
 
 ## Live classifier
 
@@ -281,6 +337,7 @@ and counted. Features live in `features.py` (`ac_rms` excludes invalid samples).
 .venv/bin/python -m pytest                     # unit + regression + fault-injection tests
 .venv/bin/python -m pytest tests/test_collection_*.py   # stiffness collection only
 .venv/bin/python -m pytest tests/test_collection_selection.py   # next-trial edits
+.venv/bin/python -m pytest tests/test_collection_surface.py     # surface press, plan extension
 .venv/bin/python -m gforce_emg_ui.bench        # host-only benchmark (add --quick, --json out.json)
 .venv/bin/python -m pytest tests/test_live_*.py           # live classifier
 .venv/bin/python -m gforce_emg_ui.live.bench --model PATH # live classifier, simulated bursts

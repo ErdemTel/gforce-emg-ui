@@ -3,7 +3,8 @@ CollectionController (timed, labelled trials on the shared Recorder).
 
 Plan mode: Object / Target / Movement show the controller's pending trial. Only
 user activation (`activated`) edits it, one field at a time; programmatic display
-uses QSignalBlocker and never counts as an edit."""
+uses QSignalBlocker and never counts as an edit. Surface Press is a task condition
+listed after the objects; it is ticked separately (opt-in) and always stationary."""
 
 from pathlib import Path
 from typing import Callable, Optional
@@ -13,11 +14,14 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 from ..collection.controller import (AVAILABILITY_BYPASS_TEXT, FINALIZING, HAND_SIDES, IDLE,
                                      MANUAL_OVERRIDE, REVIEW, REVIEW_REASONS, ROLES, RUNNING,
                                      SAVING_REVIEW, CollectionController, TrialSpec)
-from ..collection.plan import (DEFAULT_PLAN_COUNTS, EMPTY_HAND, FIELD_NAMES, default_posture,
-                               describe, merge_objects, trial_values)
+from ..collection.plan import (DEFAULT_PLAN_COUNTS, EMPTY_HAND, EXTENDABLE, EXTENDED,
+                               FIELD_NAMES, SURFACE_PRESS_COUNTS, TASK_CONDITIONS,
+                               default_posture, describe, merge_objects, trial_values)
 from ..collection.protocol import (ABORTED, HOLD, OPERATOR_NOTES, PREPARE, REST, SETTLE,
-                                   MOTION_ORDER, MOTIONS, STATIONARY, TARGET_ORDER, TARGETS,
-                                   ProtocolSettings, phase_instruction)
+                                   MOTION_ORDER, MOTIONS, STATIONARY, SURFACE_OPERATOR_NOTES,
+                                   SURFACE_PRESS, SURFACE_PRESS_NAME, SURFACE_PRESS_POSTURE,
+                                   TARGET_ORDER, TARGETS, ProtocolSettings, phase_instruction,
+                                   trial_type)
 
 TICK_MS = 50
 PHASE_COLORS = {PREPARE: "#1565c0", SETTLE: "#ef6c00", HOLD: "#2e7d32", REST: "#757575",
@@ -26,6 +30,7 @@ AUDIO_EVENTS = ("PREPARE_START", "SETTLE_START", "HOLD_START", "REST_START", "AB
 PLAN_MODE, MANUAL_MODE = "plan", "manual"
 MOTION_SHORT = {STATIONARY: "stationary", "wrist_flex_ext": "wrist flex/ext",
                 "forearm_rotation": "forearm rotation", "reach_sweep": "reach/sweep"}
+POSTURE_SHORT = {SURFACE_PRESS_POSTURE: "press"}      # narrow panel
 
 
 class WheelGuard(QtCore.QObject):
@@ -160,9 +165,10 @@ class StiffnessCollectionPanel(QtWidgets.QWidget):
         form = self._form = QtWidgets.QFormLayout()
         form.setVerticalSpacing(4)
         self.mode_combo = QtWidgets.QComboBox()
-        self.mode_combo.addItem("Plan (200 dev. trials)", PLAN_MODE)
+        self.mode_combo.addItem("Plan (dev. trials)", PLAN_MODE)
         self.mode_combo.addItem("Manual (practice / test)", MANUAL_MODE)
-        self.mode_combo.setToolTip("Plan: the persistent 200-trial development plan.\n"
+        self.mode_combo.setToolTip("Plan: the persistent development plan (200 trials, 230 with "
+                                   "Surface Press).\n"
                                    "Manual: choose condition/target yourself for practice or "
                                    "held-out tests (never counted toward the plan).")
         form.addRow("Mode", self.mode_combo)
@@ -206,6 +212,9 @@ class StiffnessCollectionPanel(QtWidgets.QWidget):
         empty.setEnabled(False)
         empty.setToolTip("Always included until its planned trials are complete")
         grid.addWidget(empty, 1 + len(self.avail_checks) // 3, len(self.avail_checks) % 3)
+        self.surface_check = QtWidgets.QCheckBox(SURFACE_PRESS_NAME)   # opt-in, unticked
+        self.surface_check.toggled.connect(self._on_available_changed)
+        grid.addWidget(self.surface_check, 2 + len(self.avail_checks) // 3, 0, 1, 3)
         form.addRow(self.avail_row)                    # full width: fits the narrow panel
         self.next_label = QtWidgets.QLabel("--")        # explicit short lines, no wrapping
         form.addRow(self.next_label)
@@ -228,7 +237,7 @@ class StiffnessCollectionPanel(QtWidgets.QWidget):
         form.addRow("Object", self.object_combo)
         self.posture_combo = QtWidgets.QComboBox()
         self.posture_combo.setEditable(True)
-        self.posture_combo.addItems(["fist", "grasp"])
+        self.posture_combo.addItems(["fist", "grasp", SURFACE_PRESS_POSTURE])
         self.posture_desc = QtWidgets.QLineEdit()
         self.posture_desc.setPlaceholderText("posture description")
         row = QtWidgets.QHBoxLayout()
@@ -264,7 +273,7 @@ class StiffnessCollectionPanel(QtWidgets.QWidget):
         form.addRow("Notes", self.notes_edit)
         v.addLayout(form)
         for combo in (self.mode_combo, self.hand_combo, self.plan_combo, self.object_combo,
-                      self.target_combo, self.motion_combo, self.role_combo):
+                      self.target_combo, self.motion_combo, self.role_combo, self.posture_combo):
             # Narrow side panel: let combos shrink (full text stays in the popup)
             combo.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToMinimumContentsLengthWithIcon)
             combo.setMinimumContentsLength(8)
@@ -403,6 +412,11 @@ class StiffnessCollectionPanel(QtWidgets.QWidget):
         self.seed_edit = QtWidgets.QLineEdit()
         self.seed_edit.setPlaceholderText("random")
         f.addRow("New-plan seed", self.seed_edit)
+        self.btn_extend_plan = QtWidgets.QPushButton("Add 30 Surface Press Trials")
+        self.btn_extend_plan.setToolTip("Append 10 low / 10 medium / 10 high stationary surface-"
+                                        "press trials to the selected plan (once; same plan ID)")
+        self.btn_extend_plan.clicked.connect(lambda: self._extend_plan())
+        f.addRow(self.btn_extend_plan)
         self.objects_edit = QtWidgets.QPlainTextEdit()
         self.objects_edit.setFixedHeight(96)
         self.objects_edit.setToolTip("One object per line: id = name. IDs of the default "
@@ -484,7 +498,8 @@ class StiffnessCollectionPanel(QtWidgets.QWidget):
 
     def _on_available_changed(self, *_):
         self.controller.set_available_objects(
-            [oid for oid, cb in self.avail_checks.items() if cb.isChecked()])
+            [oid for oid, cb in self.avail_checks.items() if cb.isChecked()]
+            + ([SURFACE_PRESS] if self.surface_check.isChecked() else []))
         self._planned_key = None
 
     def _on_field_activated(self, name: str, value):
@@ -536,6 +551,36 @@ class StiffnessCollectionPanel(QtWidgets.QWidget):
         if plan is not None:
             self._message(f"Saving plan {plan.plan_id} (seed {plan.seed})…")
 
+    def _extend_plan(self, confirm: bool = True) -> bool:
+        """Add 30 Surface Press trials to the selected plan, after confirmation."""
+        c = self.controller
+        status, why = c.extension_status()
+        if status != EXTENDABLE:
+            if confirm:
+                box = (QtWidgets.QMessageBox.information if status == EXTENDED
+                       else QtWidgets.QMessageBox.warning)
+                box(self, "Add Surface Press trials", why)
+            self._message(why, error=status != EXTENDED)
+            return False
+        n = sum(SURFACE_PRESS_COUNTS)
+        if confirm:
+            ans = QtWidgets.QMessageBox.question(
+                self, "Add 30 Surface Press Trials",
+                f"Plan {c.plan.plan_id} ({c.plan.participant_id}): {c.plan.total} → "
+                f"{c.plan.total + n} planned trials.\n\n"
+                f"Adds {n} stationary index-finger presses on a desk: 10 LOW, 10 MEDIUM, "
+                "10 HIGH. Existing trials, trial IDs, accepted recordings and progress are "
+                "kept; the current plan file is backed up to plan_backups/ first. This can "
+                "be done only once per plan.",
+                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No, QtWidgets.QMessageBox.No)
+            if ans != QtWidgets.QMessageBox.Yes:
+                return False
+        ok = c.extend_plan()
+        if not ok:
+            self._message(c.error, error=True)
+        self.tick()
+        return ok
+
     def _save_objects(self):
         items = []
         for line in self.objects_edit.toPlainText().splitlines():
@@ -548,9 +593,12 @@ class StiffnessCollectionPanel(QtWidgets.QWidget):
     def _on_object_changed(self, *_):
         if self.mode != MANUAL_MODE:
             return
-        posture, desc = default_posture(self.object_combo.currentData() or EMPTY_HAND)
+        oid = self.object_combo.currentData() or EMPTY_HAND
+        posture, desc = default_posture(oid)
         self.posture_combo.setCurrentText(posture)
         self.posture_desc.setText(desc)
+        if oid in TASK_CONDITIONS:                       # surface press: stationary only
+            self.motion_combo.setCurrentIndex(self.motion_combo.findData(STATIONARY))
 
     def spec(self) -> TrialSpec:
         c = self.controller
@@ -596,7 +644,7 @@ class StiffnessCollectionPanel(QtWidgets.QWidget):
             else:
                 first = "Plan complete"
             noise = ("come from the plan", "match the planned", "Object ID:", "Posture ID:",
-                     "Target:", "Movement:")
+                     "Target:", "Movement:", "Surface Press")
             blockers = [first] + [b for b in blockers if not any(n in b for n in noise)]
         return blockers
 
@@ -680,7 +728,7 @@ class StiffnessCollectionPanel(QtWidgets.QWidget):
             current = self.object_combo.currentData()
             with QtCore.QSignalBlocker(self.object_combo):
                 self.object_combo.clear()
-                for oid, name in c.objects:
+                for oid, name in list(c.objects) + list(TASK_CONDITIONS.items()):
                     self.object_combo.addItem(f"{oid} – {name}" if name != oid else oid, oid)
                 i = self.object_combo.findData(current)
                 self.object_combo.setCurrentIndex(max(i, 0))
@@ -688,7 +736,7 @@ class StiffnessCollectionPanel(QtWidgets.QWidget):
             for oid, cb in self.avail_checks.items():
                 cb.setToolTip(c.object_name(oid))
             self._on_object_changed()
-        plans = [p.plan_id for p in c.plans]
+        plans = [(p.plan_id, p.total) for p in c.plans]
         if plans != self._plans_shown:
             self._plans_shown = plans
             with QtCore.QSignalBlocker(self.plan_combo):
@@ -744,8 +792,9 @@ class StiffnessCollectionPanel(QtWidgets.QWidget):
         name = c.object_name(obj) if obj else ""
         name = name if len(name) <= 22 else name[:21] + "…"
         head = f"<b>{tid}</b> of {c.plan.total}" if tid else "<b>no match</b>"
+        what = name if obj in TASK_CONDITIONS else f"{obj} ({name})" if obj else "--"
         return (f"Next: {head} · <b>{TARGETS[tgt]['display'] if tgt in TARGETS else '--'}</b>"
-                f" · {posture or '--'}<br>{obj or '--'}{f' ({name})' if obj else ''}<br>"
+                f" · {POSTURE_SHORT.get(posture, posture) or '--'}<br>{what}<br>"
                 f"Movement: <b>{MOTION_SHORT.get(motion, '--')}</b>"
                 + (" (plan v1: no movement)" if v1 else ""))
 
@@ -770,7 +819,9 @@ class StiffnessCollectionPanel(QtWidgets.QWidget):
                 else "same values as the proposal" if auto else "no automatic proposal") + (
                 f" · auto {auto['trial_id']}" if auto else "") + "</small>"
             state = "<b style='color:#ef6c00'>Edited</b> (this trial only)"
-            parts = ([p.problem] if p.problem else []) + list(p.warnings)
+            parts = ([p.problem] if p.problem else []) + list(p.warnings) + (
+                ["Movement set to stationary: Surface Press is stationary only."]
+                if p.enforced else [])
             if auto:
                 parts.append(f"Automatic proposal: {auto['trial_id']} "
                              f"{describe(trial_values(c.plan, auto))}.")
@@ -819,6 +870,7 @@ class StiffnessCollectionPanel(QtWidgets.QWidget):
         known = spec.target_label in TARGETS
         target = spec.target_label if known else "low"
         motion = spec.motion_condition if spec.motion_condition in MOTIONS else STATIONARY
+        task = trial_type(spec.object_id)
         info = TARGETS[target]
         tgt_text = ((f"Target: {info['display']} (s = {info['s']:g})" if known else "Target: --")
                     + "<br><span style='font-weight:normal'>Movement: "
@@ -829,7 +881,7 @@ class StiffnessCollectionPanel(QtWidgets.QWidget):
             big = (f"{phase}  {m.phase_remaining():4.1f} s" if m.active
                    else "STOPPED" if phase == ABORTED else "TRIAL END")
             color, fg = PHASE_COLORS.get(phase, color), "white"
-            instr = phase_instruction(phase, target, motion)
+            instr = phase_instruction(phase, target, motion, task)
             times = f"elapsed {m.elapsed():5.1f} s · remaining {m.total_remaining():5.1f} s"
             summary = (f"<b style='color:#c62828'>● Stiffness trial {c.spec.trial_id}</b> "
                        f"{phase} {m.phase_remaining():.1f} s · {info['display']}")
@@ -838,7 +890,7 @@ class StiffnessCollectionPanel(QtWidgets.QWidget):
             big = "STOPPED – SAVING…" if aborted else "SAVING…"
             if aborted:
                 color, fg = PHASE_COLORS[ABORTED], "white"
-            instr = phase_instruction(ABORTED if aborted else REST, target, motion)
+            instr = phase_instruction(ABORTED if aborted else REST, target, motion, task)
             times = f"recorded {m.elapsed():.1f} s" if m else ""
             summary = "<b>Stiffness trial: finalizing…</b>"
         elif c.state in (REVIEW, SAVING_REVIEW):
@@ -857,8 +909,9 @@ class StiffnessCollectionPanel(QtWidgets.QWidget):
             big = "READY" if ready else "NOT READY"
             if ready:
                 color, fg = "#c8e6c9", "#1b5e20"
+            note = (SURFACE_OPERATOR_NOTES if task == SURFACE_PRESS else OPERATOR_NOTES)[target]
             instr = ("Rest between trials as long as needed; start when the participant is "
-                     "ready." + (f"<br><i>Operator: {OPERATOR_NOTES[target]}</i>" if known else ""))
+                     "ready." + (f"<br><i>Operator: {note}</i>" if known else ""))
             st = c.settings
             times = (f"{st.total_s:g} s trial: PREPARE {st.prepare_s:g} · SETTLE {st.settle_s:g}"
                      f" · HOLD {st.hold_s:g} · REST {st.rest_s:g} s")
@@ -885,6 +938,15 @@ class StiffnessCollectionPanel(QtWidgets.QWidget):
         self.plan_combo.setEnabled(idle and plan_mode and len(c.plans) > 0)
         for cb in self.avail_checks.values():
             cb.setEnabled(idle and plan_mode)
+        has_surface = c.plan is not None and SURFACE_PRESS in c.plan.counts
+        self.surface_check.setEnabled(idle and plan_mode and has_surface)
+        tip = ("Include Surface Press trials in the random selection" if has_surface else
+               "This plan has no Surface Press trials (Protocol & plan settings → Add 30 "
+               "Surface Press Trials)")
+        if self.surface_check.toolTip() != tip:
+            self.surface_check.setToolTip(tip)
+        self.btn_extend_plan.setEnabled(idle and plan_mode and c.plan is not None and not c.busy
+                                        and not c.loading)
         self.btn_new_plan.setEnabled(idle and plan_mode and c.participant_id is not None
                                      and not c.loading)
         # Plan mode: editable for the next trial only (role, trial ID, posture follow the plan)
@@ -960,11 +1022,17 @@ class StiffnessCollectionPanel(QtWidgets.QWidget):
                 cells = "".join(f"<td align='center'>{p.by_cell[(obj, t)][0]}/{p.by_cell[(obj, t)][1]}"
                                 f"</td>" for t in TARGET_ORDER)
                 rows.append(f"<tr><td>{obj}</td>{cells}</tr>")
+            surface = [p.by_cell.get((SURFACE_PRESS, t)) for t in TARGET_ORDER]
+            surface = "Surface Press: " + " · ".join(
+                f"{TARGETS[t]['display']} {a}/{n}" for t, (a, n) in zip(TARGET_ORDER, surface)) \
+                + f" · total {sum(a for a, _ in surface)}/{sum(n for _, n in surface)}<br>" \
+                if all(surface) else ""
             self.progress_label.setText(
                 f"<b>Accepted development trials: {p.accepted} / {p.total_planned}</b>{sim}"
-                f"<table cellspacing='4'>{''.join(rows)}</table>"
-                + ("movement: " + " · ".join(f"{MOTION_SHORT[m]} {a}/{n}" for m, (a, n)
-                                             in p.by_motion.items()) + "<br>"
+                f"<table cellspacing='4'>{''.join(rows)}</table>" + surface
+                + (("movement (grasp/fist): " if surface else "movement: ")
+                   + " · ".join(f"{MOTION_SHORT[m]} {a}/{n}" for m, (a, n)
+                                in p.by_motion.items()) + "<br>"
                    if p.by_motion else "plan v1: no movement assigned (recorded stationary)<br>")
                 + f"attempted {p.attempted} · rejected {p.rejected} · invalid {p.invalid} · "
                 f"unreviewed {p.unreviewed} · remaining {p.remaining}")
@@ -974,7 +1042,7 @@ class StiffnessCollectionPanel(QtWidgets.QWidget):
                      for role, cats in sorted(counts.items())]
             self.progress_label.setText(
                 "<b>Attempts</b>" + sim + "<br>" + ("<br>".join(parts) if parts else "none yet")
-                + "<br><small>Practice and held-out tests never count toward the 200-trial plan."
+                + "<br><small>Practice and held-out tests never count toward the plan."
                   "</small>")
 
     def _message(self, text: str, error: bool = False):
