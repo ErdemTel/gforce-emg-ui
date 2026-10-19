@@ -1,6 +1,6 @@
 {
   "schema": "gforce_emg_ui.stiffness_plan",
-  "schema_version": 2,
+  "schema_version": 4,
   "plan_id": "plan-1a6fd0c9",
   "participant_id": "Erdem",
   "data_source": "real",
@@ -39,6 +39,16 @@
       10,
       11,
       11
+    ],
+    "surface_press": [
+      10,
+      10,
+      10
+    ],
+    "open_hand": [
+      15,
+      10,
+      10
     ]
   },
   "motion_conditions": [
@@ -168,9 +178,190 @@
         "forearm_rotation": 3,
         "reach_sweep": 3
       }
+    },
+    "surface_press": {
+      "low": {
+        "stationary": 10,
+        "wrist_flex_ext": 0,
+        "forearm_rotation": 0,
+        "reach_sweep": 0
+      },
+      "medium": {
+        "stationary": 10,
+        "wrist_flex_ext": 0,
+        "forearm_rotation": 0,
+        "reach_sweep": 0
+      },
+      "high": {
+        "stationary": 10,
+        "wrist_flex_ext": 0,
+        "forearm_rotation": 0,
+        "reach_sweep": 0
+      }
+    },
+    "open_hand": {
+      "low": {
+        "stationary": 4,
+        "wrist_flex_ext": 4,
+        "forearm_rotation": 4,
+        "reach_sweep": 3
+      },
+      "medium": {
+        "stationary": 3,
+        "wrist_flex_ext": 2,
+        "forearm_rotation": 2,
+        "reach_sweep": 3
+      },
+      "high": {
+        "stationary": 2,
+        "wrist_flex_ext": 3,
+        "forearm_rotation": 3,
+        "reach_sweep": 2
+      }
     }
   },
-  "total": 200,
+  "extensions": [
+    {
+      "id": "surface_press/v1",
+      "condition": "surface_press",
+      "display": "Surface Press (Desk)",
+      "trial_type": "surface_press",
+      "posture_id": "index_finger_press",
+      "motion_condition": "stationary",
+      "task_instruction_version": "surface-press/1",
+      "counts_low_medium_high": [
+        10,
+        10,
+        10
+      ],
+      "seed": 330980817,
+      "generator": "weighted-random-order/no-target-run-over-2/surface-press/v1",
+      "max_target_run": 2,
+      "added": "2026-10-19T11:21:03",
+      "total_before": 200,
+      "total_after": 230,
+      "added_trial_ids": [
+        "t201",
+        "t202",
+        "t203",
+        "t204",
+        "t205",
+        "t206",
+        "t207",
+        "t208",
+        "t209",
+        "t210",
+        "t211",
+        "t212",
+        "t213",
+        "t214",
+        "t215",
+        "t216",
+        "t217",
+        "t218",
+        "t219",
+        "t220",
+        "t221",
+        "t222",
+        "t223",
+        "t224",
+        "t225",
+        "t226",
+        "t227",
+        "t228",
+        "t229",
+        "t230"
+      ],
+      "original_sha256": "ae29508f7eebaf640703b23a3429c945544c415695b3eac1bb5270929df779e6",
+      "backup": "plan_backups/plan_plan-1a6fd0c9.before-surface-press.json"
+    },
+    {
+      "id": "open_hand/v1",
+      "condition": "open_hand",
+      "display": "Open hand (no object)",
+      "trial_type": "open_hand",
+      "posture_id": "open_hand",
+      "motion_conditions": [
+        "stationary",
+        "wrist_flex_ext",
+        "forearm_rotation",
+        "reach_sweep"
+      ],
+      "motion_counts": {
+        "low": {
+          "stationary": 4,
+          "wrist_flex_ext": 4,
+          "forearm_rotation": 4,
+          "reach_sweep": 3
+        },
+        "medium": {
+          "stationary": 3,
+          "wrist_flex_ext": 2,
+          "forearm_rotation": 2,
+          "reach_sweep": 3
+        },
+        "high": {
+          "stationary": 2,
+          "wrist_flex_ext": 3,
+          "forearm_rotation": 3,
+          "reach_sweep": 2
+        }
+      },
+      "motion_split": "motion_split: even per target, remainders rotate over the movements from stationary",
+      "task_instruction_version": "open-hand/1",
+      "counts_low_medium_high": [
+        15,
+        10,
+        10
+      ],
+      "seed": 1061084237,
+      "generator": "weighted-random-order/no-target-run-over-2/motion-split/open-hand/v1",
+      "max_target_run": 2,
+      "added": "2026-10-19T11:21:12",
+      "total_before": 230,
+      "total_after": 265,
+      "added_trial_ids": [
+        "t231",
+        "t232",
+        "t233",
+        "t234",
+        "t235",
+        "t236",
+        "t237",
+        "t238",
+        "t239",
+        "t240",
+        "t241",
+        "t242",
+        "t243",
+        "t244",
+        "t245",
+        "t246",
+        "t247",
+        "t248",
+        "t249",
+        "t250",
+        "t251",
+        "t252",
+        "t253",
+        "t254",
+        "t255",
+        "t256",
+        "t257",
+        "t258",
+        "t259",
+        "t260",
+        "t261",
+        "t262",
+        "t263",
+        "t264",
+        "t265"
+      ],
+      "original_sha256": "9a953ad1a37189dc5f39a967e3243a198d5e680bea393b06d8aa94b522ec550b",
+      "backup": "plan_backups/plan_plan-1a6fd0c9.before-open-hand.json"
+    }
+  ],
+  "total": 265,
   "trials": [
     {
       "index": 1,
@@ -1771,6 +1962,591 @@
       "posture_id": "grasp",
       "target_label": "high",
       "motion_condition": "forearm_rotation"
+    },
+    {
+      "index": 201,
+      "trial_id": "t201",
+      "object_id": "surface_press",
+      "posture_id": "index_finger_press",
+      "target_label": "high",
+      "motion_condition": "stationary",
+      "trial_type": "surface_press"
+    },
+    {
+      "index": 202,
+      "trial_id": "t202",
+      "object_id": "surface_press",
+      "posture_id": "index_finger_press",
+      "target_label": "high",
+      "motion_condition": "stationary",
+      "trial_type": "surface_press"
+    },
+    {
+      "index": 203,
+      "trial_id": "t203",
+      "object_id": "surface_press",
+      "posture_id": "index_finger_press",
+      "target_label": "medium",
+      "motion_condition": "stationary",
+      "trial_type": "surface_press"
+    },
+    {
+      "index": 204,
+      "trial_id": "t204",
+      "object_id": "surface_press",
+      "posture_id": "index_finger_press",
+      "target_label": "low",
+      "motion_condition": "stationary",
+      "trial_type": "surface_press"
+    },
+    {
+      "index": 205,
+      "trial_id": "t205",
+      "object_id": "surface_press",
+      "posture_id": "index_finger_press",
+      "target_label": "low",
+      "motion_condition": "stationary",
+      "trial_type": "surface_press"
+    },
+    {
+      "index": 206,
+      "trial_id": "t206",
+      "object_id": "surface_press",
+      "posture_id": "index_finger_press",
+      "target_label": "high",
+      "motion_condition": "stationary",
+      "trial_type": "surface_press"
+    },
+    {
+      "index": 207,
+      "trial_id": "t207",
+      "object_id": "surface_press",
+      "posture_id": "index_finger_press",
+      "target_label": "medium",
+      "motion_condition": "stationary",
+      "trial_type": "surface_press"
+    },
+    {
+      "index": 208,
+      "trial_id": "t208",
+      "object_id": "surface_press",
+      "posture_id": "index_finger_press",
+      "target_label": "high",
+      "motion_condition": "stationary",
+      "trial_type": "surface_press"
+    },
+    {
+      "index": 209,
+      "trial_id": "t209",
+      "object_id": "surface_press",
+      "posture_id": "index_finger_press",
+      "target_label": "high",
+      "motion_condition": "stationary",
+      "trial_type": "surface_press"
+    },
+    {
+      "index": 210,
+      "trial_id": "t210",
+      "object_id": "surface_press",
+      "posture_id": "index_finger_press",
+      "target_label": "medium",
+      "motion_condition": "stationary",
+      "trial_type": "surface_press"
+    },
+    {
+      "index": 211,
+      "trial_id": "t211",
+      "object_id": "surface_press",
+      "posture_id": "index_finger_press",
+      "target_label": "low",
+      "motion_condition": "stationary",
+      "trial_type": "surface_press"
+    },
+    {
+      "index": 212,
+      "trial_id": "t212",
+      "object_id": "surface_press",
+      "posture_id": "index_finger_press",
+      "target_label": "medium",
+      "motion_condition": "stationary",
+      "trial_type": "surface_press"
+    },
+    {
+      "index": 213,
+      "trial_id": "t213",
+      "object_id": "surface_press",
+      "posture_id": "index_finger_press",
+      "target_label": "medium",
+      "motion_condition": "stationary",
+      "trial_type": "surface_press"
+    },
+    {
+      "index": 214,
+      "trial_id": "t214",
+      "object_id": "surface_press",
+      "posture_id": "index_finger_press",
+      "target_label": "low",
+      "motion_condition": "stationary",
+      "trial_type": "surface_press"
+    },
+    {
+      "index": 215,
+      "trial_id": "t215",
+      "object_id": "surface_press",
+      "posture_id": "index_finger_press",
+      "target_label": "low",
+      "motion_condition": "stationary",
+      "trial_type": "surface_press"
+    },
+    {
+      "index": 216,
+      "trial_id": "t216",
+      "object_id": "surface_press",
+      "posture_id": "index_finger_press",
+      "target_label": "high",
+      "motion_condition": "stationary",
+      "trial_type": "surface_press"
+    },
+    {
+      "index": 217,
+      "trial_id": "t217",
+      "object_id": "surface_press",
+      "posture_id": "index_finger_press",
+      "target_label": "low",
+      "motion_condition": "stationary",
+      "trial_type": "surface_press"
+    },
+    {
+      "index": 218,
+      "trial_id": "t218",
+      "object_id": "surface_press",
+      "posture_id": "index_finger_press",
+      "target_label": "low",
+      "motion_condition": "stationary",
+      "trial_type": "surface_press"
+    },
+    {
+      "index": 219,
+      "trial_id": "t219",
+      "object_id": "surface_press",
+      "posture_id": "index_finger_press",
+      "target_label": "high",
+      "motion_condition": "stationary",
+      "trial_type": "surface_press"
+    },
+    {
+      "index": 220,
+      "trial_id": "t220",
+      "object_id": "surface_press",
+      "posture_id": "index_finger_press",
+      "target_label": "low",
+      "motion_condition": "stationary",
+      "trial_type": "surface_press"
+    },
+    {
+      "index": 221,
+      "trial_id": "t221",
+      "object_id": "surface_press",
+      "posture_id": "index_finger_press",
+      "target_label": "medium",
+      "motion_condition": "stationary",
+      "trial_type": "surface_press"
+    },
+    {
+      "index": 222,
+      "trial_id": "t222",
+      "object_id": "surface_press",
+      "posture_id": "index_finger_press",
+      "target_label": "high",
+      "motion_condition": "stationary",
+      "trial_type": "surface_press"
+    },
+    {
+      "index": 223,
+      "trial_id": "t223",
+      "object_id": "surface_press",
+      "posture_id": "index_finger_press",
+      "target_label": "medium",
+      "motion_condition": "stationary",
+      "trial_type": "surface_press"
+    },
+    {
+      "index": 224,
+      "trial_id": "t224",
+      "object_id": "surface_press",
+      "posture_id": "index_finger_press",
+      "target_label": "medium",
+      "motion_condition": "stationary",
+      "trial_type": "surface_press"
+    },
+    {
+      "index": 225,
+      "trial_id": "t225",
+      "object_id": "surface_press",
+      "posture_id": "index_finger_press",
+      "target_label": "low",
+      "motion_condition": "stationary",
+      "trial_type": "surface_press"
+    },
+    {
+      "index": 226,
+      "trial_id": "t226",
+      "object_id": "surface_press",
+      "posture_id": "index_finger_press",
+      "target_label": "medium",
+      "motion_condition": "stationary",
+      "trial_type": "surface_press"
+    },
+    {
+      "index": 227,
+      "trial_id": "t227",
+      "object_id": "surface_press",
+      "posture_id": "index_finger_press",
+      "target_label": "high",
+      "motion_condition": "stationary",
+      "trial_type": "surface_press"
+    },
+    {
+      "index": 228,
+      "trial_id": "t228",
+      "object_id": "surface_press",
+      "posture_id": "index_finger_press",
+      "target_label": "high",
+      "motion_condition": "stationary",
+      "trial_type": "surface_press"
+    },
+    {
+      "index": 229,
+      "trial_id": "t229",
+      "object_id": "surface_press",
+      "posture_id": "index_finger_press",
+      "target_label": "medium",
+      "motion_condition": "stationary",
+      "trial_type": "surface_press"
+    },
+    {
+      "index": 230,
+      "trial_id": "t230",
+      "object_id": "surface_press",
+      "posture_id": "index_finger_press",
+      "target_label": "low",
+      "motion_condition": "stationary",
+      "trial_type": "surface_press"
+    },
+    {
+      "index": 231,
+      "trial_id": "t231",
+      "object_id": "open_hand",
+      "posture_id": "open_hand",
+      "target_label": "low",
+      "motion_condition": "stationary",
+      "trial_type": "open_hand"
+    },
+    {
+      "index": 232,
+      "trial_id": "t232",
+      "object_id": "open_hand",
+      "posture_id": "open_hand",
+      "target_label": "medium",
+      "motion_condition": "stationary",
+      "trial_type": "open_hand"
+    },
+    {
+      "index": 233,
+      "trial_id": "t233",
+      "object_id": "open_hand",
+      "posture_id": "open_hand",
+      "target_label": "high",
+      "motion_condition": "forearm_rotation",
+      "trial_type": "open_hand"
+    },
+    {
+      "index": 234,
+      "trial_id": "t234",
+      "object_id": "open_hand",
+      "posture_id": "open_hand",
+      "target_label": "low",
+      "motion_condition": "stationary",
+      "trial_type": "open_hand"
+    },
+    {
+      "index": 235,
+      "trial_id": "t235",
+      "object_id": "open_hand",
+      "posture_id": "open_hand",
+      "target_label": "medium",
+      "motion_condition": "reach_sweep",
+      "trial_type": "open_hand"
+    },
+    {
+      "index": 236,
+      "trial_id": "t236",
+      "object_id": "open_hand",
+      "posture_id": "open_hand",
+      "target_label": "low",
+      "motion_condition": "forearm_rotation",
+      "trial_type": "open_hand"
+    },
+    {
+      "index": 237,
+      "trial_id": "t237",
+      "object_id": "open_hand",
+      "posture_id": "open_hand",
+      "target_label": "medium",
+      "motion_condition": "stationary",
+      "trial_type": "open_hand"
+    },
+    {
+      "index": 238,
+      "trial_id": "t238",
+      "object_id": "open_hand",
+      "posture_id": "open_hand",
+      "target_label": "low",
+      "motion_condition": "stationary",
+      "trial_type": "open_hand"
+    },
+    {
+      "index": 239,
+      "trial_id": "t239",
+      "object_id": "open_hand",
+      "posture_id": "open_hand",
+      "target_label": "low",
+      "motion_condition": "wrist_flex_ext",
+      "trial_type": "open_hand"
+    },
+    {
+      "index": 240,
+      "trial_id": "t240",
+      "object_id": "open_hand",
+      "posture_id": "open_hand",
+      "target_label": "medium",
+      "motion_condition": "wrist_flex_ext",
+      "trial_type": "open_hand"
+    },
+    {
+      "index": 241,
+      "trial_id": "t241",
+      "object_id": "open_hand",
+      "posture_id": "open_hand",
+      "target_label": "high",
+      "motion_condition": "forearm_rotation",
+      "trial_type": "open_hand"
+    },
+    {
+      "index": 242,
+      "trial_id": "t242",
+      "object_id": "open_hand",
+      "posture_id": "open_hand",
+      "target_label": "low",
+      "motion_condition": "reach_sweep",
+      "trial_type": "open_hand"
+    },
+    {
+      "index": 243,
+      "trial_id": "t243",
+      "object_id": "open_hand",
+      "posture_id": "open_hand",
+      "target_label": "high",
+      "motion_condition": "stationary",
+      "trial_type": "open_hand"
+    },
+    {
+      "index": 244,
+      "trial_id": "t244",
+      "object_id": "open_hand",
+      "posture_id": "open_hand",
+      "target_label": "low",
+      "motion_condition": "stationary",
+      "trial_type": "open_hand"
+    },
+    {
+      "index": 245,
+      "trial_id": "t245",
+      "object_id": "open_hand",
+      "posture_id": "open_hand",
+      "target_label": "high",
+      "motion_condition": "wrist_flex_ext",
+      "trial_type": "open_hand"
+    },
+    {
+      "index": 246,
+      "trial_id": "t246",
+      "object_id": "open_hand",
+      "posture_id": "open_hand",
+      "target_label": "low",
+      "motion_condition": "wrist_flex_ext",
+      "trial_type": "open_hand"
+    },
+    {
+      "index": 247,
+      "trial_id": "t247",
+      "object_id": "open_hand",
+      "posture_id": "open_hand",
+      "target_label": "low",
+      "motion_condition": "reach_sweep",
+      "trial_type": "open_hand"
+    },
+    {
+      "index": 248,
+      "trial_id": "t248",
+      "object_id": "open_hand",
+      "posture_id": "open_hand",
+      "target_label": "high",
+      "motion_condition": "reach_sweep",
+      "trial_type": "open_hand"
+    },
+    {
+      "index": 249,
+      "trial_id": "t249",
+      "object_id": "open_hand",
+      "posture_id": "open_hand",
+      "target_label": "medium",
+      "motion_condition": "forearm_rotation",
+      "trial_type": "open_hand"
+    },
+    {
+      "index": 250,
+      "trial_id": "t250",
+      "object_id": "open_hand",
+      "posture_id": "open_hand",
+      "target_label": "low",
+      "motion_condition": "reach_sweep",
+      "trial_type": "open_hand"
+    },
+    {
+      "index": 251,
+      "trial_id": "t251",
+      "object_id": "open_hand",
+      "posture_id": "open_hand",
+      "target_label": "low",
+      "motion_condition": "wrist_flex_ext",
+      "trial_type": "open_hand"
+    },
+    {
+      "index": 252,
+      "trial_id": "t252",
+      "object_id": "open_hand",
+      "posture_id": "open_hand",
+      "target_label": "high",
+      "motion_condition": "reach_sweep",
+      "trial_type": "open_hand"
+    },
+    {
+      "index": 253,
+      "trial_id": "t253",
+      "object_id": "open_hand",
+      "posture_id": "open_hand",
+      "target_label": "low",
+      "motion_condition": "wrist_flex_ext",
+      "trial_type": "open_hand"
+    },
+    {
+      "index": 254,
+      "trial_id": "t254",
+      "object_id": "open_hand",
+      "posture_id": "open_hand",
+      "target_label": "low",
+      "motion_condition": "forearm_rotation",
+      "trial_type": "open_hand"
+    },
+    {
+      "index": 255,
+      "trial_id": "t255",
+      "object_id": "open_hand",
+      "posture_id": "open_hand",
+      "target_label": "high",
+      "motion_condition": "stationary",
+      "trial_type": "open_hand"
+    },
+    {
+      "index": 256,
+      "trial_id": "t256",
+      "object_id": "open_hand",
+      "posture_id": "open_hand",
+      "target_label": "medium",
+      "motion_condition": "reach_sweep",
+      "trial_type": "open_hand"
+    },
+    {
+      "index": 257,
+      "trial_id": "t257",
+      "object_id": "open_hand",
+      "posture_id": "open_hand",
+      "target_label": "high",
+      "motion_condition": "wrist_flex_ext",
+      "trial_type": "open_hand"
+    },
+    {
+      "index": 258,
+      "trial_id": "t258",
+      "object_id": "open_hand",
+      "posture_id": "open_hand",
+      "target_label": "medium",
+      "motion_condition": "reach_sweep",
+      "trial_type": "open_hand"
+    },
+    {
+      "index": 259,
+      "trial_id": "t259",
+      "object_id": "open_hand",
+      "posture_id": "open_hand",
+      "target_label": "medium",
+      "motion_condition": "stationary",
+      "trial_type": "open_hand"
+    },
+    {
+      "index": 260,
+      "trial_id": "t260",
+      "object_id": "open_hand",
+      "posture_id": "open_hand",
+      "target_label": "low",
+      "motion_condition": "forearm_rotation",
+      "trial_type": "open_hand"
+    },
+    {
+      "index": 261,
+      "trial_id": "t261",
+      "object_id": "open_hand",
+      "posture_id": "open_hand",
+      "target_label": "medium",
+      "motion_condition": "wrist_flex_ext",
+      "trial_type": "open_hand"
+    },
+    {
+      "index": 262,
+      "trial_id": "t262",
+      "object_id": "open_hand",
+      "posture_id": "open_hand",
+      "target_label": "low",
+      "motion_condition": "forearm_rotation",
+      "trial_type": "open_hand"
+    },
+    {
+      "index": 263,
+      "trial_id": "t263",
+      "object_id": "open_hand",
+      "posture_id": "open_hand",
+      "target_label": "high",
+      "motion_condition": "forearm_rotation",
+      "trial_type": "open_hand"
+    },
+    {
+      "index": 264,
+      "trial_id": "t264",
+      "object_id": "open_hand",
+      "posture_id": "open_hand",
+      "target_label": "high",
+      "motion_condition": "wrist_flex_ext",
+      "trial_type": "open_hand"
+    },
+    {
+      "index": 265,
+      "trial_id": "t265",
+      "object_id": "open_hand",
+      "posture_id": "open_hand",
+      "target_label": "medium",
+      "motion_condition": "forearm_rotation",
+      "trial_type": "open_hand"
     }
   ]
 }
