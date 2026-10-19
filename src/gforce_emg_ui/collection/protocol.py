@@ -7,7 +7,8 @@ a REST interval is never "low", whatever the trial's target. Each trial also has
 one motion condition; in moving trials the movement starts in SETTLE and continues
 through HOLD, so HOLD means "maintain the effort", not "stay still".
 Surface-press trials (index fingertip on a desk) use their own texts and are
-always stationary; grasp / empty-hand texts are unchanged.
+always stationary; open-hand trials (hand comfortably open, no fist, no object)
+have their own texts and any movement; grasp / empty-hand texts are unchanged.
 
 Labels are INSTRUCTED EFFORT / INTENDED ROBOT GAIN levels. They are not measured
 physical human stiffness, force, %MVC or verified antagonist co-contraction.
@@ -78,10 +79,15 @@ MOVEMENT_PHASES = (SETTLE, HOLD)
 
 # Trial types (task conditions). Grasp = object grasp or empty-hand fist (texts above).
 # Surface press: index fingertip pressed on a desk, always stationary.
-GRASP, SURFACE_PRESS = "grasp", "surface_press"
+# Open hand: hand comfortably open (no fist, no object), same movements as empty hand.
+GRASP, SURFACE_PRESS, OPEN_HAND = "grasp", "surface_press", "open_hand"
+TASK_TYPES = (SURFACE_PRESS, OPEN_HAND)
 SURFACE_PRESS_NAME = "Surface Press (Desk)"
 SURFACE_PRESS_POSTURE = "index_finger_press"
-TASK_INSTRUCTION_VERSIONS = {GRASP: "grasp/1", SURFACE_PRESS: "surface-press/1"}
+OPEN_HAND_NAME = "Open hand (no object)"
+OPEN_HAND_POSTURE = "open_hand"
+TASK_INSTRUCTION_VERSIONS = {GRASP: "grasp/1", SURFACE_PRESS: "surface-press/1",
+                             OPEN_HAND: "open-hand/1"}
 SURFACE_TARGET_INSTRUCTIONS = {
     "low": "Maintain light fingertip contact with the surface without intentionally adding "
            "downward pressure. Keep your finger and wrist posture steady.",
@@ -106,10 +112,47 @@ SURFACE_OPERATOR_NOTES = {
     "medium": "Medium is NOT a measured 50% of force, EMG, MVC or human stiffness.",
     "high": "Strong but comfortable press: never maximal, no body weight on the finger.",
 }
+OPEN_TARGET_INSTRUCTIONS = {
+    "low": "Keep your hand comfortably open and relax your forearm and hand as much as the "
+           "required posture allows. Do not intentionally tense, squeeze, press, or spread your "
+           "fingers.",
+    "medium": "While keeping your hand open, establish a comfortable, repeatable moderate forearm "
+              "contraction. Do not close your hand into a fist or press against anything.",
+    "high": "While keeping your hand open, establish a firm, comfortable, repeatable forearm "
+            "contraction. Keep the same open-hand posture. Do not use a maximal effort, force "
+            "your joints straight, or press against anything.",
+}
+OPEN_PREPARE = ("Keep your hand comfortably open, without making a fist or holding an object. "
+                "Allow a natural slight finger curve; do not force your fingers straight or spread "
+                "them widely. Choose a comfortable arm position and keep it consistent. Do not "
+                "press your fingertips or palm into a surface.")
+OPEN_SUPPORT = "You may support your forearm comfortably without compressing the armband."
+OPEN_REST = "Release the intentional contraction and rest your hand and forearm."
+OPEN_ABORTED = "Trial stopped. Stop any movement, release the contraction, and rest."
+OPEN_OPERATOR_NOTES = {
+    "low": "s=0 is instructed open-hand relaxation, not zero EMG; a relaxed hand need not be "
+           "perfectly flat. Moving LOW = no added hand/grip tension (the movement itself still "
+           "uses forearm muscles).",
+    "medium": "The hand must stay open: a fist means the trial was not performed as instructed. "
+              "Medium is NOT a measured 50% of force or activation.",
+    "high": "The hand must stay open: a fist means the trial was not performed as instructed. "
+            "Firm but comfortable: not a maximal strength test.",
+}
+OPEN_OPERATOR_SCOPE = ("Following the instruction does not verify co-contraction or physical "
+                       "stiffness.")
+TASK_TARGET_INSTRUCTIONS = {GRASP: TARGET_INSTRUCTIONS, SURFACE_PRESS: SURFACE_TARGET_INSTRUCTIONS,
+                            OPEN_HAND: OPEN_TARGET_INSTRUCTIONS}
 
 
 def trial_type(object_id: str) -> str:
-    return SURFACE_PRESS if object_id == SURFACE_PRESS else GRASP
+    return object_id if object_id in TASK_TYPES else GRASP
+
+
+def operator_note(target: str, task: str = GRASP) -> str:
+    """Operator-only note for a target (shown in the panel and saved with the trial)."""
+    if task == OPEN_HAND:
+        return f"{OPEN_OPERATOR_NOTES[target]} {OPEN_OPERATOR_SCOPE}"
+    return (SURFACE_OPERATOR_NOTES if task == SURFACE_PRESS else OPERATOR_NOTES)[target]
 
 # Marker labels written to markers.csv (stable, machine-readable)
 MARKERS = ("PREPARE_START", "SETTLE_START", "HOLD_START", "HOLD_END", "REST_START",
@@ -136,6 +179,8 @@ def phase_instruction(phase: str, target: str, motion: str = STATIONARY,
         if phase == SETTLE:
             return f"{SURFACE_PHASE_TEXT[SETTLE]} {SURFACE_TARGET_INSTRUCTIONS[target]}"
         return SURFACE_PHASE_TEXT.get(phase, "")
+    if task == OPEN_HAND:
+        return _open_hand_instruction(phase, target, motion)
     level = TARGETS[target]["display"]
     move = MOTIONS[motion]["movement"]
     if phase == PREPARE:
@@ -163,6 +208,40 @@ def phase_instruction(phase: str, target: str, motion: str = STATIONARY,
     return ""
 
 
+def _open_hand_instruction(phase: str, target: str, motion: str) -> str:
+    """Open hand: LOW cues relaxation, MEDIUM / HIGH a forearm contraction, hand open."""
+    level = TARGETS[target]["display"]
+    move = MOTIONS[motion]["movement"]
+    low = target == "low"
+    if phase == PREPARE:
+        if move:
+            return (f"{OPEN_PREPARE} Movement this trial: {MOTIONS[motion]['display'].lower()} "
+                    "(starts in SETTLE).")
+        return f"{OPEN_PREPARE} {OPEN_SUPPORT}"
+    if phase == SETTLE:
+        if low and move:
+            return (f"Begin the movement: {move}. Add no hand or grip tension while moving. "
+                    + OPEN_TARGET_INSTRUCTIONS[target])
+        if low:
+            return f"Gradually relax. {OPEN_TARGET_INSTRUCTIONS[target]}"
+        start = f"Smoothly establish the {level} forearm contraction"
+        return (f"{start} and begin the movement: {move}. " if move else f"{start}. ") + \
+            OPEN_TARGET_INSTRUCTIONS[target]
+    if phase == HOLD:
+        state = "Stay relaxed" if low else f"Maintain the {level} contraction"
+        if move:
+            return (f"{state} while you continue the movement: {move}. Keep your hand comfortably "
+                    "open; do not " + ("add hand or grip tension." if low else
+                                       "intentionally change the effort."))
+        return (f"{state} with your hand comfortably open. Keep your wrist and arm position "
+                "steady.")
+    if phase == REST:
+        return f"Stop the movement. {OPEN_REST}" if move else OPEN_REST
+    if phase == ABORTED:
+        return OPEN_ABORTED
+    return ""
+
+
 def participant_instructions(target: str, motion: str = STATIONARY, task: str = GRASP) -> dict:
     """Exact text shown in each phase, saved with the trial."""
     return {p: phase_instruction(p, target, motion, task) for p in PHASES + (ABORTED,)}
@@ -170,11 +249,9 @@ def participant_instructions(target: str, motion: str = STATIONARY, task: str = 
 
 def task_instructions(target: str, motion: str = STATIONARY, task: str = GRASP) -> dict:
     """Instruction fields saved in trial.json `label` (one source for UI and metadata)."""
-    surface = task == SURFACE_PRESS
-    return {"target_instruction": (SURFACE_TARGET_INSTRUCTIONS if surface
-                                   else TARGET_INSTRUCTIONS)[target],
+    return {"target_instruction": TASK_TARGET_INSTRUCTIONS[task][target],
             "participant_instructions": participant_instructions(target, motion, task),
-            "operator_note": (SURFACE_OPERATOR_NOTES if surface else OPERATOR_NOTES)[target],
+            "operator_note": operator_note(target, task),
             "task_instruction_version": TASK_INSTRUCTION_VERSIONS[task]}
 
 

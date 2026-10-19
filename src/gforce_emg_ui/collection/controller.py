@@ -23,9 +23,11 @@ exactly those values, or holds the reason there is none (Start blocked).
 clear_edits returns to the proposal. Start re-resolves and freezes a copy of
 the spec and its selection provenance for the attempt. Surface press is
 stationary only: choosing it as the object also sets the movement to stationary.
+Open hand keeps the requested movement.
 
-extend_plan appends the 30 surface-press trials to the selected plan file on the
-I/O thread (idle only; Start is blocked until it finished).
+extend_plan appends one task condition's trials (30 surface press or 35 open
+hand) to the selected plan file on the I/O thread (idle only; Start, plan and
+participant changes wait until it finished).
 """
 
 import copy
@@ -40,14 +42,14 @@ from .. import __version__
 from ..config import EMG_CHANNELS, IMU_LABELS
 from ..recorder import ERROR, SAVED
 from ..sources import RECONNECTING, STREAMING
-from .plan import (EMPTY_HAND, EXTENDABLE, INCOMPATIBLE, MANUAL_SELECTION_RULE, MAX_TARGET_RUN,
-                   OBJECTS_FILE, SELECTION_FIELDS, SELECTION_RULE, TASK_CONDITIONS, Progress,
-                   TrialPlan, attempt_category, compute_progress, eligible_trials,
-                   extend_plan_file, load_objects, merge_objects, objects_doc, participant_root,
-                   pick_trial, resolve_request, run_banned_target, scan_participant,
-                   surface_press_status, trial_values)
+from .plan import (EMPTY_HAND, EXTENDABLE, EXTENSIONS, INCOMPATIBLE, MANUAL_SELECTION_RULE,
+                   MAX_TARGET_RUN, OBJECTS_FILE, SELECTION_FIELDS, SELECTION_RULE,
+                   TASK_CONDITIONS, TASKS, Progress, TrialPlan, attempt_category,
+                   compute_progress, eligible_trials, extend_plan_file, extension_status,
+                   load_objects, merge_objects, objects_doc, participant_root, pick_trial,
+                   resolve_request, run_banned_target, scan_participant, trial_values)
 from .protocol import (DONE, HOLD, LABEL_SEMANTICS, MOTIONS, PHASES, PROTOCOL_VERSION,
-                       SCHEMA_VERSION, STATIONARY, SURFACE_PRESS_POSTURE, TARGETS,
+                       SCHEMA_VERSION, STATIONARY, SURFACE_PRESS, TARGETS,
                        TRAINING_CANDIDATE_PHASE, ProtocolEvent, ProtocolSettings,
                        TrialStateMachine, motion_info, target_info, task_instructions, trial_type)
 from .readiness import (Readiness, ReadinessMonitor, StreamTracker, contact_events,
@@ -65,6 +67,7 @@ REVIEW_REASONS = {                      # IDs are stable (saved in trial.json)
     "incorrect_movement": "Incorrect movement (not as instructed)",
     "hand_movement": "Unintended hand / wrist movement",
     "grasp_change": "Unintended grasp change",
+    "incorrect_posture": "Incorrect hand posture (e.g. fist instead of open hand)",
     "fatigue": "Fatigue or discomfort",
     "contact_problem": "Electrode contact problem",
     "other": "Other (see comment)",
@@ -149,11 +152,12 @@ class TrialSpec:
             p.append(f"Movement: one of {', '.join(MOTIONS)}")
         if self.dataset_role not in ROLES:
             p.append(f"Dataset role: one of {', '.join(ROLES)}")
-        if self.object_id in TASK_CONDITIONS:
-            if self.motion_condition != STATIONARY:
-                p.append("Surface Press is stationary only")
-            if self.posture_id != SURFACE_PRESS_POSTURE:
-                p.append(f"Surface Press posture is {SURFACE_PRESS_POSTURE}")
+        task = TASKS.get(self.object_id)
+        if task is not None:
+            if task.stationary_only and self.motion_condition != STATIONARY:
+                p.append(f"{task.short} is stationary only")
+            if self.posture_id != task.posture_id:
+                p.append(f"{task.short} posture is {task.posture_id}")
         if self.planned_trial is None:
             if self.dataset_role == "development":
                 p.append("Development trials come from the plan (use Plan mode)")
@@ -288,6 +292,10 @@ class CollectionController:
         return self._scan is not None
 
     @property
+    def extending(self) -> bool:
+        return self._plan_extend is not None
+
+    @property
     def live_ids(self) -> set:
         if self.state in (RUNNING, FINALIZING) and self.sidecar:
             return {self.sidecar["attempt_id"]}
@@ -313,7 +321,7 @@ class CollectionController:
 
     def open_participant(self, output_root: Path, participant_id: str) -> bool:
         """(Re)load plans, attempts and the object catalog on the I/O thread."""
-        if self.state != IDLE:
+        if self.state != IDLE or self.extending:
             return False
         self.output_root = Path(output_root)
         self.participant_id = participant_id if valid_id(participant_id) else None
@@ -329,7 +337,7 @@ class CollectionController:
         return True
 
     def select_plan(self, plan_id: Optional[str]):
-        if self.state != IDLE:
+        if self.state != IDLE or self.extending:
             return
         self.plan = next((p for p in self.plans if p.plan_id == plan_id), None)
         self._recompute()
@@ -444,7 +452,8 @@ class CollectionController:
         p.requested[field_name] = value
         changed = {field_name}
         motion = p.requested.get("motion_condition")
-        if field_name == "object_id" and value in TASK_CONDITIONS and motion != STATIONARY:
+        if field_name == "object_id" and value in TASKS and TASKS[value].stationary_only \
+                and motion != STATIONARY:
             p.enforced["motion_condition"] = motion          # surface press: stationary only
             p.requested["motion_condition"] = STATIONARY
             changed.add("motion_condition")
@@ -544,24 +553,26 @@ class CollectionController:
         self._plan_write = (self.io.submit(job), plan)
         return plan
 
-    def extension_status(self) -> Tuple[str, str]:
-        """Whether the selected plan can get its 30 surface-press trials (see plan.py)."""
+    def extension_status(self, condition: str = SURFACE_PRESS) -> Tuple[str, str]:
+        """Whether the selected plan can get the task condition's trials (see plan.py)."""
         if self.plan is None:
             return INCOMPATIBLE, "No plan selected."
-        return surface_press_status(self.plan)
+        return extension_status(self.plan, condition)
 
-    def extend_plan(self) -> bool:
-        """Explicit, one-time extension of the selected plan file by 30 surface-press
-        trials (same plan_id). Idle only; plan writes and Start wait for it."""
+    def extend_plan(self, condition: str = SURFACE_PRESS) -> bool:
+        """Explicit, one-time extension of the selected plan file by one task condition
+        (same plan_id). Idle only; plan writes, plan / participant changes and Start
+        wait for it."""
         if self.state != IDLE or self.busy or self._scan is not None or self.plan is None:
             self.error = "The plan can only be extended while idle (no trial, review or save open)."
             return False
-        status, why = surface_press_status(self.plan)
+        status, why = extension_status(self.plan, condition)
         if status != EXTENDABLE:
             self.error = why
             return False
         proot = self.participant_root()
-        fut = self.io.submit(extend_plan_file, proot / self.plan.filename, copy.deepcopy(self.plan))
+        fut = self.io.submit(extend_plan_file, proot / self.plan.filename,
+                             copy.deepcopy(self.plan), None, condition)
         self._plan_extend = (fut, self.plan.plan_id, proot)
         self.error, self.message = "", f"Extending plan {self.plan.plan_id}…"
         return True
@@ -955,9 +966,10 @@ class CollectionController:
                     if self.plan is not None and self.plan.plan_id == plan_id:
                         self.select_plan(plan_id)
                 ext = new.extensions[-1]
+                task = EXTENSIONS[ext["id"]]
                 self.error = ""
                 self.message = (f"Plan {plan_id}: {ext['total_before']} → {ext['total_after']} "
-                                f"trials (30 Surface Press added; backup {ext['backup']})")
+                                f"trials ({task.total} {task.short} added; backup {ext['backup']})")
         if self._objects_write is not None and self._objects_write[0].done():
             fut, objects = self._objects_write
             self._objects_write = None

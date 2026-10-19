@@ -153,9 +153,9 @@ amplitude are never checked: contact (even red) is only recorded in `trial.json`
 reset, recorder or trial.json error, phase overrun > 1 s, manual Stop, Disconnect, closing
 the app. Lost/invalid samples and gaps during HOLD flag it; flagged HOLDs cannot be accepted.
 
-**Plan** (*Mode → Plan*, *New…*): 200 accepted development trials per participant (230 after
-adding Surface Press, below), seeded order, no target run > 2, saved before the first trial,
-resumed in later sessions. Each
+**Plan** (*Mode → Plan*, *New…*): 200 accepted development trials per participant (+30
+Surface Press, +35 Open hand: below), seeded order, no target run > 2, saved before the first
+trial, resumed in later sessions. Each
 condition × target cell is split over the four movements (≥ 2 each; 50 per movement).
 Older plan files without movement are used unchanged; their trials are recorded stationary.
 
@@ -203,9 +203,9 @@ grasp trials; only the instructions differ:
 | SETTLE / HOLD / REST | establish / keep / release the pressing effort |
 
 **Add the trials to an existing plan** (once): select the plan → *Protocol & plan settings* →
-**Add 30 Surface Press Trials** → confirm (shows plan ID and 200 → 230). Appends 10 low,
-10 medium, 10 high (`t201`–`t230`, or the next free IDs), seeded order. The plan ID, the
-first 200 trials, accepted recordings and progress stay as they are. The old file is copied
+**Add 30 Surface Press Trials** → confirm (shows plan ID and totals, e.g. 200 → 230).
+Appends 10 low, 10 medium, 10 high (`t201`–`t230`, or the next free IDs), seeded order. The
+plan ID, the first 200 trials, accepted recordings and progress stay as they are. The old file is copied
 to `plan_backups/` first, then replaced atomically; a failed write leaves it unchanged.
 A second click only says the plan is already extended; non-standard plans are refused.
 Extended plans are `schema_version` 3, so older app versions refuse to load them.
@@ -222,10 +222,60 @@ surface-press trial keeps the condition. Progress shows
 The classifier (`emg-stiffness-data`) reads these trials and does not filter by object:
 accepted presses train with the grasps under the same LOW/MEDIUM/HIGH labels.
 
+### Open hand
+
+Task condition `open_hand` (*Open hand (no object)*): like empty hand, but the hand stays
+comfortably open (no fist, no object), posture `open_hand`, all four movements. Same
+protocol, recorder, labels and review. LOW is instructed relaxation; MEDIUM / HIGH are
+forearm contractions with the hand still open (not measured force or co-contraction).
+
+| phase / target | instruction (shown and saved in `trial.json`) |
+|---|---|
+| PREPARE | hand comfortably open, natural slight finger curve (not forced straight or spread), consistent arm position, nothing pressed; stationary: forearm may be supported without pressing the armband |
+| LOW | relax hand and forearm as far as the posture allows; no tensing, squeezing, pressing or spreading |
+| MEDIUM | comfortable, repeatable moderate forearm contraction; hand open, no fist, nothing pressed |
+| HIGH | firm, comfortable, repeatable contraction, same open hand; not maximal, joints not forced straight |
+| SETTLE | LOW: relax; MEDIUM / HIGH: establish the contraction (moving: start the movement) |
+| HOLD / REST | keep the state with the hand open (moving: keep moving, effort unchanged) / release and rest |
+
+Stationary LOW = quiet relaxation. Moving LOW = no added hand or grip tension while moving;
+the movement itself still uses forearm muscles. `motion_condition` keeps them apart in the
+data. A fist during MEDIUM / HIGH means the trial was not performed as instructed: Reject or
+Repeat with *Wrong posture*.
+
+**Add the trials** (once): select the plan → *Protocol & plan settings* → **Add 35 Open-Hand
+Trials** → confirm. The dialog shows the plan ID, the actual totals (200 → 235, or 230 → 265
+after Surface Press) and the allocation (15 / 10 / 10 in total, split evenly over the plan's
+movements, so only 4 stationary relaxed LOW):
+
+| movement | LOW | MEDIUM | HIGH |
+|---|---|---|---|
+| stationary | 4 | 3 | 2 |
+| wrist flex/ext | 4 | 2 | 3 |
+| forearm rotation | 4 | 2 | 3 |
+| reach/sweep | 3 | 3 | 2 |
+
+New trials get the next free IDs (e.g. `t231`–`t265`) in a seeded order; earlier trials,
+extension records, recordings and progress stay as they are; backup
+`plan_backups/<plan>.before-open-hand.json`. Either order with Surface Press works, each
+once. Plans with open hand are `schema_version` 4 (older app versions refuse them);
+inconsistent or partly extended plans are refused with the reason, never repaired.
+
+**Record:** tick **Open hand (no object)** (opt-in, like Surface Press) or set *Object* to
+`open_hand`: target and movement are kept, posture becomes `open_hand`; without a remaining
+trial for that target / movement Start stays disabled with the reason. Progress shows
+`Open hand: LOW x/15 · MEDIUM y/10 · HIGH z/10 · total n/35` (accepted only).
+
+`trial.json`: `condition.object_id` / `trial_type` / `posture_id` = `open_hand`, the actual
+`motion_condition`, `label.task_instruction_version` = `open-hand/1`, the exact instructions
+and operator note; same class / s mapping and `label_source`. The live model does not learn
+from new recordings: copy accepted trials to `emg-stiffness-data` and retrain before they can
+affect live predictions (its reports list `open_hand` as its own object).
+
 ```
 <data-dir>/stiffness_collection/P01/
   plan_plan-1a2b3c4d.json
-  plan_backups/plan_plan-1a2b3c4d.before-surface-press.json
+  plan_backups/plan_plan-1a2b3c4d.before-surface-press.json   (and .before-open-hand.json)
   S01/20261015_134056_obj05_medium_s0p5_t001_a01_f889bbb8/
     emg.csv imu.csv contact.csv markers.csv session.json trial.json
 <data-dir>/stiffness_collection/simulated/...      simulator data, never real
@@ -255,7 +305,7 @@ git commit -m "Add <P> trials" && git push
 
 Private is not anonymous: participant IDs (folder names, `trial.json`) and the band's MAC
 address (`session.json`) are in the files. Size: ~2.6 MB per trial (~0.5 MB compressed),
-largest file 11 MB; 230 trials ≈ 0.6 GB raw. Plain git is fine at this size; consider
+largest file 11 MB; 265 trials ≈ 0.7 GB raw. Plain git is fine at this size; consider
 Git LFS if single files approach 50 MB or the repo grows to several GB.
 
 ## Live classifier
@@ -338,6 +388,7 @@ and counted. Features live in `features.py` (`ac_rms` excludes invalid samples).
 .venv/bin/python -m pytest tests/test_collection_*.py   # stiffness collection only
 .venv/bin/python -m pytest tests/test_collection_selection.py   # next-trial edits
 .venv/bin/python -m pytest tests/test_collection_surface.py     # surface press, plan extension
+.venv/bin/python -m pytest tests/test_collection_open_hand.py   # open hand, both extensions
 .venv/bin/python -m gforce_emg_ui.bench        # host-only benchmark (add --quick, --json out.json)
 .venv/bin/python -m pytest tests/test_live_*.py           # live classifier
 .venv/bin/python -m gforce_emg_ui.live.bench --model PATH # live classifier, simulated bursts
