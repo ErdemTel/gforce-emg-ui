@@ -18,7 +18,11 @@ from typing import Any, Optional, Tuple
 TRUST_NOTE = ("Model files are joblib/pickle: loading one can run arbitrary code from the "
               "file. Load only a model you trained yourself and keep on this machine.")
 INSTALL_HINT = "see README (Live Classifier) to install emg-classifier into this environment"
-PRIMARY = "short_window_lda"
+# short-window model_name -> required pipeline steps
+SUPPORTED = {
+    "short_window_lda": ["StandardScaler", "LinearDiscriminantAnalysis"],
+    "short_window_mlp": ["StandardScaler", "MLPClassifier"],
+}
 REJECTED = {
     "whole_hold_lda": "a whole-HOLD baseline (one prediction per complete HOLD, not "
                       "live-compatible)",
@@ -153,10 +157,10 @@ def load_trusted_model(path) -> LoadedModel:
 
     name = _need(meta, "model_name", str, "model type")
     if name in REJECTED:
-        raise ModelError(f"{path.name} is {REJECTED[name]}; the Live Classifier needs the "
-                         f"short-window model ({PRIMARY})")
-    if name != PRIMARY:
-        raise ModelError(f"unknown model type {name!r}; only {PRIMARY} is supported")
+        raise ModelError(f"{path.name} is {REJECTED[name]}; the Live Classifier needs a "
+                         f"short-window model ({' or '.join(SUPPORTED)})")
+    if name not in SUPPORTED:
+        raise ModelError(f"unknown model type {name!r}; supported: {', '.join(SUPPORTED)}")
     if trained.get("scikit-learn") != installed["scikit-learn"] or version_warnings:
         raise ModelError(f"model trained with scikit-learn {trained.get('scikit-learn')}, this "
                          f"environment has {installed['scikit-learn']} "
@@ -194,8 +198,8 @@ def load_trusted_model(path) -> LoadedModel:
 
     steps = getattr(clf.pipeline, "steps", None) or []
     kinds = [type(est).__name__ for _, est in steps]
-    if kinds != ["StandardScaler", "LinearDiscriminantAnalysis"]:
-        raise ModelError(f"pipeline {kinds} is not StandardScaler -> LinearDiscriminantAnalysis")
+    if kinds != SUPPORTED[name]:
+        raise ModelError(f"pipeline {kinds} is not {' -> '.join(SUPPORTED[name])} ({name})")
     if getattr(clf.pipeline, "n_features_in_", None) != len(channels):
         raise ModelError(f"model expects {getattr(clf.pipeline, 'n_features_in_', None)} "
                          f"features, metadata lists {len(channels)} channels")

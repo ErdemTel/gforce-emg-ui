@@ -319,7 +319,8 @@ not validated.
 Install the classifier into this `.venv` (pins = the model's training environment; nothing
 else is upgraded). Clone the private data repo next to this one
 (`git clone -b classifier https://github.com/ErdemTel/emg-stiffness-data.git`; it contains the
-selected model `runs/lda_hold_001/model.joblib`), then from this folder (Windows: same
+models `runs/lda_hold_001/model.joblib` (LDA) and `runs/mlp_hold_30w_seed42_001/model.joblib`
+(MLP); both are accepted), then from this folder (Windows: same
 commands in PowerShell with `.venv\Scripts\pip`). Needs a 64-bit Python 3.12–3.14 `.venv` (the pinned
 numpy / scipy have no older wheels; pip then reports a numpy "conflict"):
 
@@ -394,9 +395,10 @@ and counted. Features live in `features.py` (`ac_rms` excludes invalid samples).
 .venv/bin/python -m gforce_emg_ui.live.bench --model PATH # live classifier, simulated bursts
 ```
 
-Real-model live tests use `../emg-stiffness-data/runs/lda_hold_001/model.joblib` and
-`../emg-stiffness-data/Erdem` (override with `GFORCE_LIVE_MODEL`, `GFORCE_LIVE_DATA`) and are
-skipped when absent.
+Real-model live tests use `../emg-stiffness-data/runs/lda_hold_001/model.joblib`,
+`../emg-stiffness-data/runs/mlp_hold_30w_seed42_001/model.joblib` and
+`../emg-stiffness-data/Erdem` (override with `GFORCE_LIVE_MODEL`, `GFORCE_LIVE_MLP_MODEL`,
+`GFORCE_LIVE_DATA`) and are skipped when absent.
 
 The benchmark uses simulated data only. It does **not** measure the band, BLE throughput or
 end-to-end sensor latency.

@@ -24,8 +24,17 @@ DATA = Path(os.environ.get("GFORCE_LIVE_DATA", REPO.parent / "emg-stiffness-data
 MODEL_SHA256 = "54f12a4a4a17d38f71380518a0bb12876df9a975de234178fd0a4caade16b8c4"
 CODE_SHA256 = "aaf3646bb71753e5e24e72e47e54f75ea4f89ba66e551cb30a236978b19836c6"
 
+MLP_MODEL = Path(os.environ.get(
+    "GFORCE_LIVE_MLP_MODEL",
+    REPO.parent / "emg-stiffness-data/runs/mlp_hold_30w_seed42_001/model.joblib"))
+MLP_SHA256 = "f97c2af2299f92412cf379347fb992aad09630290fa178ddfc5d7616fd2e0d7d"
+# installed wheel = classifier 5e86bd4 = the MLP's training sources
+INSTALLED_CODE_SHA256 = "90d119ab0de2e8f58e401c6010ffee891f9889f12461edbb799b4b63340412b2"
+
 needs_model = pytest.mark.skipif(not (classifier_status()[0] and MODEL.is_file()),
                                  reason="emg-classifier or the selected model not available")
+needs_mlp = pytest.mark.skipif(not (classifier_status()[0] and MLP_MODEL.is_file()),
+                               reason="emg-classifier or the MLP model not available")
 needs_data = pytest.mark.skipif(not DATA.is_dir(), reason="recorded trials not available")
 
 
@@ -82,6 +91,11 @@ def offline(model, folder):
     return rec, core, wins, X, model.clf.predict_windows(X, channel_names=model.channel_names)
 
 
+def training_folders(model):
+    """The model's own training trials (DATA may hold newer recordings too)."""
+    return [DATA / t["folder"] for t in model.training["trials"]]
+
+
 def run_live(model, core, sizes=(16,), dtype=np.float64, clock=None):
     """Feed the HOLD core samples as live EMG blocks through the DataHub."""
     clock = clock or Clock()
@@ -134,9 +148,29 @@ def test_selected_artifact_is_the_final_short_window_model(model):
     # fitted on all 51 eligible trials x 10 windows, not a CV-fold model
     assert model.training["n_trials"] == 51 and model.training["n_windows"] == 510
     assert int(steps[0][1].n_samples_seen_) == 510
-    # corrected rerun: the installed classifier sources are the ones it was trained with
-    assert model.code_sha256 == model.installed_code_sha256 == CODE_SHA256
-    assert model.warnings == ()
+    # trained with c347549 sources; the installed 5e86bd4 only adds the MLP (same LDA path)
+    assert model.code_sha256 == CODE_SHA256
+    assert model.installed_code_sha256 == INSTALLED_CODE_SHA256
+    assert len(model.warnings) == 1 and "sources" in model.warnings[0]
+
+
+@pytest.fixture(scope="module")
+def mlp():
+    return load_trusted_model(MLP_MODEL)
+
+
+@needs_mlp
+def test_mlp_artifact_is_accepted(mlp):
+    assert mlp.sha256 == MLP_SHA256 and mlp.name == "short_window_mlp"
+    assert (mlp.window_samples, mlp.hop_samples) == (100, 25)
+    assert mlp.channel_names == tuple(f"ch{i}" for i in range(1, 9))
+    assert mlp.classes == ((0, "low", 0.0), (1, "medium", 0.5), (2, "high", 1.0))
+    steps = mlp.clf.pipeline.steps
+    assert [type(e).__name__ for _, e in steps] == ["StandardScaler", "MLPClassifier"]
+    assert mlp.training["n_trials"] == 51 and mlp.training["n_windows"] == 1530
+    assert int(steps[0][1].n_samples_seen_) == 1530
+    assert mlp.code_sha256 == mlp.installed_code_sha256 == INSTALLED_CODE_SHA256
+    assert mlp.warnings == ()
 
 
 @needs_model
@@ -158,8 +192,7 @@ def test_scaler_matches_the_saved_training_windows(model):
 @needs_data
 def test_live_adapter_matches_offline_api_on_all_recorded_hold_windows(model):
     from emg_classifier import features as F
-    from emg_classifier.trials import discover
-    folders = discover(DATA)
+    folders = training_folders(model)
     assert len(folders) == 51
     n_windows, max_diff, disagree, wrong = 0, 0.0, [], 0
     for folder in folders:
@@ -190,6 +223,26 @@ def test_live_adapter_matches_offline_api_on_all_recorded_hold_windows(model):
           f"in-sample (training data) windows whose class differs from the instructed label "
           f"in BOTH paths: {wrong}; HOLD-mean disagreements: {disagree}")
     assert n_windows > 2500
+
+
+@needs_mlp
+@needs_data
+def test_mlp_live_adapter_matches_offline_api(mlp):
+    n = 0
+    for folder in training_folders(mlp):
+        _, core, _, X, off = offline(mlp, folder)
+        rec_clf, rows, snap = run_live(mlp, core, sizes=(16, 37))
+        assert snap.counters["resets"] == {} and len(rec_clf.windows) == len(X) == len(rows)
+        for lw, ow in zip(rec_clf.windows, X):
+            np.testing.assert_array_equal(lw, ow)
+        for r, p in zip(rows, off):
+            assert r["valid"] == 1 and r["class_id"] == p.class_id
+            assert r["s_discrete"] == p.s_discrete
+            np.testing.assert_allclose([r["p_low"], r["p_medium"], r["p_high"]],
+                                       [p.probabilities[l] for l in ("low", "medium", "high")],
+                                       rtol=1e-12, atol=1e-15)
+        n += len(rows)
+    assert n > 2500
 
 
 @needs_model
@@ -307,6 +360,8 @@ def _artifact(tmp_path, edit=None, sidecar=True, name="model.joblib"):
     ("baseline", lambda o: o["metadata"].update(model_name="global_amplitude_lda"),
      "global-amplitude"),
     ("unknown_type", lambda o: o["metadata"].update(model_name="cnn"), "unknown model type"),
+    ("name_vs_pipeline", lambda o: o["metadata"].update(model_name="short_window_mlp"),
+     "not StandardScaler -> MLPClassifier"),
     ("artifact_version", lambda o: o.update(artifact_version=99), "artifact_version"),
     ("no_window", lambda o: o["metadata"].pop("window_samples"), "window"),
     ("ms_units", lambda o: o["metadata"].update(window_units="ms"), "not sample counts"),
@@ -348,7 +403,7 @@ def test_source_hash_ignores_windows_line_endings(tmp_path):
         (tmp_path / f.name).write_bytes(f.read_bytes().replace(b"\n", b"\r\n"))
     assert package_sha256(tmp_path) == package_sha256(pkg)
     if MODEL.is_file():
-        assert package_sha256(tmp_path) == CODE_SHA256
+        assert package_sha256(tmp_path) == INSTALLED_CODE_SHA256
 
 
 def test_missing_classifier_package_gives_an_actionable_message(tmp_path, monkeypatch):
