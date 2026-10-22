@@ -15,27 +15,43 @@ is written atomically on the I/O thread: at start (identity, status
 SAVED and trial.json was written. Progress is recomputed from trial.json files.
 Only accepted attempts are kept: Reject / Repeat (and closing the app before
 review) delete the attempt folder, aborted or not.
+
+Plan mode: the next planned trial is a random proposal (plan_cursor). The
+operator may edit its object, target or movement for that one trial
+(edit_selection); `pending` then resolves to an incomplete planned trial with
+exactly those values, or holds the reason there is none (Start blocked).
+clear_edits returns to the proposal. Start re-resolves and freezes a copy of
+the spec and its selection provenance for the attempt. Surface press is
+stationary only: choosing it as the object also sets the movement to stationary.
+Open hand keeps the requested movement.
+
+extend_plan appends one task condition's trials (30 surface press or 35 open
+hand) to the selected plan file on the I/O thread (idle only; Start, plan and
+participant changes wait until it finished).
 """
 
+import copy
 import json
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Tuple
 
 from .. import __version__
 from ..config import EMG_CHANNELS, IMU_LABELS
 from ..recorder import ERROR, SAVED
 from ..sources import RECONNECTING, STREAMING
-from .plan import (EMPTY_HAND, MAX_TARGET_RUN, OBJECTS_FILE, SELECTION_RULE, Progress,
-                   TrialPlan, attempt_category, compute_progress, eligible_trials,
+from .plan import (EMPTY_HAND, EXTENDABLE, EXTENSIONS, INCOMPATIBLE, MANUAL_SELECTION_RULE,
+                   MAX_TARGET_RUN, OBJECTS_FILE, SELECTION_FIELDS, SELECTION_RULE,
+                   TASK_CONDITIONS, TASKS, Progress, TrialPlan, attempt_category,
+                   compute_progress, eligible_trials, extend_plan_file, extension_status,
                    load_objects, merge_objects, objects_doc, participant_root, pick_trial,
-                   scan_participant)
-from .protocol import (DONE, HOLD, LABEL_SEMANTICS, MOTIONS, OPERATOR_NOTES, PHASES,
-                       PROTOCOL_VERSION, SCHEMA_VERSION, STATIONARY, TARGET_INSTRUCTIONS, TARGETS,
+                   resolve_request, run_banned_target, scan_participant, trial_values)
+from .protocol import (DONE, HOLD, LABEL_SEMANTICS, MOTIONS, PHASES, PROTOCOL_VERSION,
+                       SCHEMA_VERSION, STATIONARY, SURFACE_PRESS, TARGETS,
                        TRAINING_CANDIDATE_PHASE, ProtocolEvent, ProtocolSettings,
-                       TrialStateMachine, motion_info, participant_instructions, target_info)
+                       TrialStateMachine, motion_info, target_info, task_instructions, trial_type)
 from .readiness import (Readiness, ReadinessMonitor, StreamTracker, contact_events,
                         summarize_window)
 from .storage import (IoWorker, atomic_write_text, attempt_name, discard_attempt, dumps,
@@ -51,6 +67,7 @@ REVIEW_REASONS = {                      # IDs are stable (saved in trial.json)
     "incorrect_movement": "Incorrect movement (not as instructed)",
     "hand_movement": "Unintended hand / wrist movement",
     "grasp_change": "Unintended grasp change",
+    "incorrect_posture": "Incorrect hand posture (e.g. fist instead of open hand)",
     "fatigue": "Fatigue or discomfort",
     "contact_problem": "Electrode contact problem",
     "other": "Other (see comment)",
@@ -113,6 +130,10 @@ class TrialSpec:
             return self.planned_trial["trial_id"]
         return f"m{self.trial_number:03d}"
 
+    @property
+    def trial_type(self) -> str:
+        return trial_type(self.object_id)
+
     def problems(self) -> List[str]:
         p = []
         if not valid_id(self.participant_id):
@@ -131,6 +152,12 @@ class TrialSpec:
             p.append(f"Movement: one of {', '.join(MOTIONS)}")
         if self.dataset_role not in ROLES:
             p.append(f"Dataset role: one of {', '.join(ROLES)}")
+        task = TASKS.get(self.object_id)
+        if task is not None:
+            if task.stationary_only and self.motion_condition != STATIONARY:
+                p.append(f"{task.short} is stationary only")
+            if self.posture_id != task.posture_id:
+                p.append(f"{task.short} posture is {task.posture_id}")
         if self.planned_trial is None:
             if self.dataset_role == "development":
                 p.append("Development trials come from the plan (use Plan mode)")
@@ -145,11 +172,39 @@ class TrialSpec:
             # v1 plans assign no motion: their trials are recorded stationary
             if t.get("motion_condition", STATIONARY) != self.motion_condition:
                 p.append("Movement does not match the planned trial")
+            if t.get("posture_id", self.posture_id) != self.posture_id:
+                p.append("Posture does not match the planned trial")
         if not str(self.output_root).strip():
             p.append("Output directory not set")
         if len(self.notes) > 2000:
             p.append("Notes: at most 2000 characters")
         return p
+
+
+AUTOMATIC, MANUAL_OVERRIDE = "automatic", "manual_override"
+AVAILABILITY_BYPASS_TEXT = "Object manually selected; not in automatic available set"
+
+
+@dataclass
+class PendingSelection:
+    """The upcoming planned trial (idle only): proposal + one-trial edits. Never saved
+    into the plan; an edit changes only its own field of `requested`."""
+    proposal: Optional[int]                    # automatic proposal (plan index), None = none
+    proposal_selection: Optional[dict]         # how it was drawn
+    requested: Dict[str, Optional[str]]        # object_id / target_label / motion_condition
+    edited: List[str] = field(default_factory=list)    # fields changed by the operator
+    enforced: Dict[str, Optional[str]] = field(default_factory=dict)   # forced: previous value
+    resolved: Optional[int] = None             # incomplete planned trial with these values
+    how: str = ""                              # proposal | lowest_index
+    problem: str = ""                          # why nothing matches (Start blocked)
+    warnings: List[str] = field(default_factory=list)
+    availability_bypass: bool = False
+    ordering_bypass: bool = False
+    repeat: bool = False
+
+    @property
+    def mode(self) -> str:
+        return MANUAL_OVERRIDE if self.edited else AUTOMATIC
 
 
 class CollectionController:
@@ -174,7 +229,8 @@ class CollectionController:
         self.state = IDLE
         self.machine: Optional[TrialStateMachine] = None
         self.session = None
-        self.spec: Optional[TrialSpec] = None
+        self.spec: Optional[TrialSpec] = None          # frozen copy for the current attempt
+        self.attempt_selection: Optional[dict] = None  # its selection provenance (frozen)
         self.sidecar: Optional[dict] = None
         self.sidecar_path: Optional[Path] = None
         self.metadata_ok = False
@@ -197,6 +253,8 @@ class CollectionController:
         self.plan_cursor: Optional[int] = None
         self.available_objects: Optional[set] = None   # None = all plan objects
         self.selection: Optional[dict] = None          # how plan_cursor was chosen
+        self.pending: Optional[PendingSelection] = None   # next trial incl. one-trial edits
+        self.selection_version = 0                     # bumps when `pending` changes
         self._exclude: Optional[int] = None            # just-rejected trial, not re-picked at once
         self._discarded = 0                            # deleted attempts since the last accept
         self.progress: Optional[Progress] = None
@@ -205,6 +263,7 @@ class CollectionController:
         self.unreadable: List[str] = []
         self._scan = None                        # (future, participant root)
         self._plan_write = None                  # (future, plan)
+        self._plan_extend = None                 # (future, plan_id, participant root)
         self._objects_write = None
 
     # -- properties -----------------------------------------------------------------
@@ -225,11 +284,16 @@ class CollectionController:
     def busy(self) -> bool:
         """Something must finish before the app may close."""
         return (self.state in (RUNNING, FINALIZING, SAVING_REVIEW) or bool(self._writes)
-                or self._plan_write is not None or self._objects_write is not None)
+                or self._plan_write is not None or self._plan_extend is not None
+                or self._objects_write is not None)
 
     @property
     def loading(self) -> bool:
         return self._scan is not None
+
+    @property
+    def extending(self) -> bool:
+        return self._plan_extend is not None
 
     @property
     def live_ids(self) -> set:
@@ -238,6 +302,14 @@ class CollectionController:
         return set()
 
     def planned_trial(self) -> Optional[dict]:
+        """The planned trial Start would record: the proposal, or the edited match."""
+        p = self.pending
+        if self.plan is None or p is None or p.resolved is None:
+            return None
+        return self.plan.trials[p.resolved]
+
+    def proposed_trial(self) -> Optional[dict]:
+        """The automatic (random) proposal, edited or not."""
         if self.plan is None or self.plan_cursor is None:
             return None
         return self.plan.trials[self.plan_cursor]
@@ -249,12 +321,13 @@ class CollectionController:
 
     def open_participant(self, output_root: Path, participant_id: str) -> bool:
         """(Re)load plans, attempts and the object catalog on the I/O thread."""
-        if self.state != IDLE:
+        if self.state != IDLE or self.extending:
             return False
         self.output_root = Path(output_root)
         self.participant_id = participant_id if valid_id(participant_id) else None
         self.records, self.plans, self.plan = {}, [], None
         self.plan_cursor, self.progress, self.unreadable = None, None, []
+        self._set_pending(None)                  # never carry a selection into another context
         if self.participant_id is None:
             self._scan = None
             return False
@@ -264,25 +337,31 @@ class CollectionController:
         return True
 
     def select_plan(self, plan_id: Optional[str]):
-        if self.state != IDLE:
+        if self.state != IDLE or self.extending:
             return
         self.plan = next((p for p in self.plans if p.plan_id == plan_id), None)
         self._recompute()
         self._exclude, self._discarded = None, 0
+        self._set_pending(None)
         self._pick_next()
+        self._update_pending()
 
     def available(self) -> set:
-        """Objects available now (empty hand is always added by the selection)."""
+        """Objects available now (empty hand is always added by the selection). Task
+        conditions (surface press) only when ticked."""
         if self.plan is None:
             return set()
         objs = set(self.plan.counts) - {EMPTY_HAND}
-        return objs if self.available_objects is None else objs & set(self.available_objects)
+        if self.available_objects is None:
+            return objs - set(TASK_CONDITIONS)
+        return objs & set(self.available_objects)
 
     def set_available_objects(self, objects) -> bool:
         if self.state != IDLE:
             return False
         self.available_objects = set(objects)
         self._pick_next()
+        self._update_pending()                   # an edited draft keeps its values
         self.version += 1
         return True
 
@@ -307,9 +386,160 @@ class CollectionController:
                           "eligible": len(eligible_trials(self.plan, self.progress, avail)),
                           "recent_targets": recent, "key": key, "excluded_index": self._exclude}
 
+    # -- pending selection (one-trial edits) -------------------------------------------
+    def _set_pending(self, pending: Optional[PendingSelection]):
+        self.pending = pending
+        self.selection_version += 1
+
+    def _update_pending(self):
+        """Follow the proposal, or re-resolve an edited draft (its values are kept)."""
+        if self.plan is None or self.progress is None:
+            self._set_pending(None)
+        elif self.pending is not None and self.pending.edited:
+            self.resolve_selection()
+        else:
+            t = self.proposed_trial()
+            self._set_pending(PendingSelection(
+                self.plan_cursor, copy.deepcopy(self.selection),
+                trial_values(self.plan, t) if t else dict.fromkeys(SELECTION_FIELDS),
+                resolved=self.plan_cursor, how="proposal" if t else ""))
+
+    def resolve_selection(self) -> Optional[int]:
+        """Resolve the edited request to an incomplete planned trial (index) or a problem.
+
+        Prefers the original proposal, then the current match, then the lowest plan
+        index. Unedited fields keep the automatic rules (the object must be ticked);
+        an explicitly edited object may bypass availability for this trial only.
+        Nothing is consumed or completed here.
+        """
+        p = self.pending
+        if p is None or not p.edited or self.plan is None or self.progress is None:
+            return self.plan_cursor if p is not None else None
+        before = (p.resolved, p.how, p.problem, list(p.warnings))
+        req, avail = p.requested, self.available() | {EMPTY_HAND}
+        obj = req.get("object_id")
+        idx, how, problem = None, "", ""
+        if obj and obj not in avail and "object_id" not in p.edited and obj in self.plan.counts:
+            problem = (f"{obj} is not ticked as available: tick it, choose another object "
+                       "or reset edits.")
+        else:
+            idx, how, problem = resolve_request(  # a kept match keeps how it was chosen
+                self.plan, self.progress, req,
+                [("proposal", p.proposal), (p.how or "kept", p.resolved)])
+        p.availability_bypass = idx is not None and obj not in avail
+        p.ordering_bypass = idx is not None and \
+            run_banned_target(self._recent_targets()) == req.get("target_label")
+        p.resolved, p.how, p.problem = idx, how, problem
+        p.warnings = ([AVAILABILITY_BYPASS_TEXT] if p.availability_bypass else []) + (
+            [f"Third {req['target_label']} target in a row (the random order avoids this)"]
+            if p.ordering_bypass else [])
+        if (p.resolved, p.how, p.problem, p.warnings) != before:
+            self.selection_version += 1
+        return idx
+
+    def edit_selection(self, field_name: str, value: str) -> bool:
+        """Set one field of the next trial (idle only); the other fields stay as they are."""
+        p = self.pending
+        if self.state != IDLE or p is None or self.plan is None or field_name not in SELECTION_FIELDS:
+            return False
+        if not {"object_id": valid_key, "target_label": TARGETS.__contains__,
+                "motion_condition": MOTIONS.__contains__}[field_name](value):
+            return False
+        if p.requested.get(field_name) == value:
+            return True
+        if not p.edited:                         # remember the proposal (provenance, reset)
+            p.proposal, p.proposal_selection = self.plan_cursor, copy.deepcopy(self.selection)
+        p.requested[field_name] = value
+        changed = {field_name}
+        motion = p.requested.get("motion_condition")
+        if field_name == "object_id" and value in TASKS and TASKS[value].stationary_only \
+                and motion != STATIONARY:
+            p.enforced["motion_condition"] = motion          # surface press: stationary only
+            p.requested["motion_condition"] = STATIONARY
+            changed.add("motion_condition")
+        elif field_name == "object_id" and "motion_condition" in p.enforced:
+            p.requested["motion_condition"] = p.enforced.pop("motion_condition")   # restore
+        elif field_name == "motion_condition":
+            p.enforced.pop("motion_condition", None)
+        p.edited = [f for f in SELECTION_FIELDS if f in p.edited or f in changed]
+        p.repeat = False
+        self.selection_version += 1
+        self.resolve_selection()
+        return True
+
+    def clear_edits(self) -> bool:
+        """Back to automatic selection: the original proposal if still valid, else a
+        normal pick by the existing selector. No-op without edits (no re-roll)."""
+        p = self.pending
+        if self.state != IDLE or self.plan is None or self.progress is None:
+            return False
+        if p is None or not p.edited:
+            return True
+        o = p.proposal
+        if o is not None and self.plan.trials[o]["trial_id"] not in self.progress.completed \
+                and self.plan.trials[o]["object_id"] in self.available() | {EMPTY_HAND}:
+            self.plan_cursor, self.selection = o, p.proposal_selection
+        else:
+            self._pick_next()
+        self._set_pending(None)
+        self._update_pending()
+        return True
+
+    def differing_fields(self) -> List[str]:
+        """Fields of the pending request that differ from the automatic proposal."""
+        p = self.pending
+        if p is None or not p.edited:
+            return []
+        if p.proposal is None:
+            return list(p.edited)
+        auto = trial_values(self.plan, self.plan.trials[p.proposal])
+        return [f for f in SELECTION_FIELDS if p.requested.get(f) != auto[f]]
+
+    def selection_record(self) -> Optional[dict]:
+        """trial.json 'selection' for the pending planned trial (additive provenance)."""
+        p, t = self.pending, self.planned_trial()
+        if p is None or t is None:
+            return None
+        if not p.edited:
+            return {"mode": AUTOMATIC, **copy.deepcopy(p.proposal_selection or {})}
+        auto = None
+        if p.proposal is not None:
+            o = self.plan.trials[p.proposal]
+            auto = {"trial_id": o["trial_id"], "planned_trial_index": o["index"],
+                    **trial_values(self.plan, o),
+                    "selection": copy.deepcopy(p.proposal_selection)}
+        return {"mode": MANUAL_OVERRIDE, "rule": MANUAL_SELECTION_RULE,
+                "automatic_proposal": auto,
+                "edited_fields": list(p.edited), "differing_fields": self.differing_fields(),
+                "enforced_fields": sorted(p.enforced),
+                "requested": dict(p.requested),
+                "resolved": {"trial_id": t["trial_id"], "planned_trial_index": t["index"],
+                             "how": p.how},
+                "available_objects": sorted(self.available()),
+                "empty_hand_always_eligible": True,
+                "availability_bypass": p.availability_bypass,
+                "ordering_preference_bypass": p.ordering_bypass,
+                "recent_targets": self._recent_targets(),
+                "repeat": p.repeat}
+
+    def _selection_blockers(self, spec: TrialSpec) -> List[str]:
+        p, t = self.pending, self.planned_trial()
+        b = []
+        if spec.object_id not in self.available() | {EMPTY_HAND} and not (
+                p is not None and p.availability_bypass and p.requested["object_id"] == spec.object_id):
+            b.append(f"{spec.object_id} is not marked available")
+        if t is None:
+            b.append(p.problem if p is not None and p.problem else "No pending planned trial")
+        elif spec.trial_id != t["trial_id"] or p.requested != {
+                "object_id": spec.object_id, "target_label": spec.target_label,
+                "motion_condition": spec.motion_condition}:
+            b.append("Next-trial selection changed: check it and press Start again")
+        return b
+
     def create_plan(self, seed: Optional[int] = None) -> Optional[TrialPlan]:
         """Generate a plan; it is usable only after its file was written."""
-        if self.participant_id is None or self._plan_write is not None or self.state != IDLE:
+        if self.participant_id is None or self._plan_write is not None or self.state != IDLE \
+                or self._plan_extend is not None:
             return None
         plan = TrialPlan.create(self.participant_id, self.data_source, seed)
         path = self.participant_root() / plan.filename
@@ -322,6 +552,30 @@ class CollectionController:
             atomic_write_text(path, text)
         self._plan_write = (self.io.submit(job), plan)
         return plan
+
+    def extension_status(self, condition: str = SURFACE_PRESS) -> Tuple[str, str]:
+        """Whether the selected plan can get the task condition's trials (see plan.py)."""
+        if self.plan is None:
+            return INCOMPATIBLE, "No plan selected."
+        return extension_status(self.plan, condition)
+
+    def extend_plan(self, condition: str = SURFACE_PRESS) -> bool:
+        """Explicit, one-time extension of the selected plan file by one task condition
+        (same plan_id). Idle only; plan writes, plan / participant changes and Start
+        wait for it."""
+        if self.state != IDLE or self.busy or self._scan is not None or self.plan is None:
+            self.error = "The plan can only be extended while idle (no trial, review or save open)."
+            return False
+        status, why = extension_status(self.plan, condition)
+        if status != EXTENDABLE:
+            self.error = why
+            return False
+        proot = self.participant_root()
+        fut = self.io.submit(extend_plan_file, proot / self.plan.filename,
+                             copy.deepcopy(self.plan), None, condition)
+        self._plan_extend = (fut, self.plan.plan_id, proot)
+        self.error, self.message = "", f"Extending plan {self.plan.plan_id}…"
+        return True
 
     def save_objects(self, objects) -> bool:
         if self.output_root is None or self._objects_write is not None:
@@ -336,7 +590,7 @@ class CollectionController:
         return True
 
     def object_name(self, object_id: str) -> str:
-        return dict(self.objects).get(object_id, object_id)
+        return dict(self.objects).get(object_id) or TASK_CONDITIONS.get(object_id, object_id)
 
     def _recompute(self):
         self.progress = (compute_progress(self.plan, self.records, self.live_ids)
@@ -384,6 +638,8 @@ class CollectionController:
         b += self.settings.validate()
         if self._scan is not None:
             b.append("Loading participant data…")
+        if self._plan_extend is not None:
+            b.append("Plan update in progress")
         elif (self.participant_id != spec.participant_id or self.output_root is None
               or Path(spec.output_root) != self.output_root):
             b.append("Participant data not loaded")
@@ -392,8 +648,8 @@ class CollectionController:
                 b.append("No saved plan selected")
             elif self.progress and spec.trial_id in self.progress.completed:
                 b.append(f"Planned trial {spec.trial_id} is already completed")
-            elif spec.object_id not in self.available() | {EMPTY_HAND}:
-                b.append(f"{spec.object_id} is not marked available")
+            else:                                # shown == started == recorded == counted
+                b += self._selection_blockers(spec)
         r = self.readiness or self.evaluate()
         if not r.ready:
             b += r.blockers
@@ -402,10 +658,14 @@ class CollectionController:
     def start_trial(self, spec: TrialSpec) -> bool:
         self.error = ""
         self.evaluate()
+        if spec.planned_trial is not None and self.state == IDLE:
+            self._update_pending()               # resolve again now, against the same state
         blockers = self.start_blockers(spec)
         if blockers:
             self.error = "Cannot start: " + "; ".join(blockers)
             return False
+        spec = copy.deepcopy(spec)               # frozen for this attempt
+        selection = self.selection_record() if spec.planned_trial is not None else None
         target = TARGETS[spec.target_label]
         attempt_id = uuid.uuid4().hex[:8]
         number = self.next_attempt_number(spec)
@@ -435,6 +695,7 @@ class CollectionController:
             self.error = f"Could not start recording: {e}"
             return False
         self.session, self.machine, self.spec = session, machine, spec
+        self.attempt_selection = selection
         self.state = RUNNING
         self.metadata_ok = False
         self.message = ""
@@ -693,6 +954,22 @@ class CollectionController:
                 self.plans.insert(0, plan)
                 self.select_plan(plan.plan_id)
                 self.message = f"Plan {plan.plan_id} saved ({plan.total} trials, seed {plan.seed})"
+        if self._plan_extend is not None and self._plan_extend[0].done():
+            fut, plan_id, proot = self._plan_extend
+            self._plan_extend = None
+            if fut.exception() is not None:
+                self.error = f"Plan was NOT extended (saved plan unchanged): {fut.exception()}"
+            else:
+                new = fut.result()
+                if self.participant_id is not None and proot == self.participant_root():
+                    self.plans = [new if p.plan_id == plan_id else p for p in self.plans]
+                    if self.plan is not None and self.plan.plan_id == plan_id:
+                        self.select_plan(plan_id)
+                ext = new.extensions[-1]
+                task = EXTENSIONS[ext["id"]]
+                self.error = ""
+                self.message = (f"Plan {plan_id}: {ext['total_before']} → {ext['total_after']} "
+                                f"trials ({task.total} {task.short} added; backup {ext['backup']})")
         if self._objects_write is not None and self._objects_write[0].done():
             fut, objects = self._objects_write
             self._objects_write = None
@@ -751,13 +1028,23 @@ class CollectionController:
         self.machine = None
         self._recompute()
         if self.spec.planned_trial is not None and self.plan is not None and self.progress:
-            cur = self.plan_cursor
+            done = next(i for i, t in enumerate(self.plan.trials)
+                        if t["trial_id"] == self.spec.trial_id)
+            p = self.pending
             if decision == "repeat" and self.spec.trial_id not in self.progress.completed:
-                self.plan_cursor = cur                  # explicit retry of the same trial
-                self.selection = {**(self.selection or {}), "repeat": True}
-            else:
-                self._exclude = cur if decision == "reject" else None
+                if p is not None and p.edited:          # same edited combination and trial
+                    p.resolved, p.repeat = done, True
+                    self.resolve_selection()
+                    self.selection_version += 1
+                else:
+                    self.plan_cursor = done             # explicit retry of the same trial
+                    self.selection = {**(self.selection or {}), "repeat": True}
+                    self._update_pending()
+            else:                                       # one-shot edits end here
+                self._exclude = done if decision == "reject" else None
+                self._set_pending(None)
                 self._pick_next()
+                self._update_pending()
         self.message = {"accept": "Accepted", "reject": "Rejected – deleted",
                         "repeat": "Rejected – deleted; repeat the same trial"}[decision]
 
@@ -776,11 +1063,12 @@ class CollectionController:
             "attempt_id": attempt_id, "attempt_number": number, "trial_id": spec.trial_id,
             "plan_id": spec.plan_id,
             "planned_trial_index": spec.planned_trial["index"] if spec.planned_trial else None,
-            "selection": dict(self.selection) if spec.planned_trial and self.selection else None,
+            "selection": copy.deepcopy(self.attempt_selection) if spec.planned_trial else None,
             "participant_id": spec.participant_id, "collection_session_id": spec.session_id,
             "dataset_role": spec.dataset_role, "data_source": self.data_source,
             "is_simulation": self.is_simulation,
             "condition": {"object_id": spec.object_id, "object_name": spec.object_name,
+                          "trial_type": spec.trial_type,
                           "motion_condition": spec.motion_condition,
                           "posture_id": spec.posture_id,
                           "posture_description": spec.posture_description,
@@ -791,10 +1079,8 @@ class CollectionController:
                       "semantics": LABEL_SEMANTICS,
                       "mapping": {k: {"target_class_id": v["class_id"], "target_s": v["s"]}
                                   for k, v in TARGETS.items()},
-                      "target_instruction": TARGET_INSTRUCTIONS[spec.target_label],
-                      "participant_instructions": participant_instructions(
-                          spec.target_label, spec.motion_condition),
-                      "operator_note": OPERATOR_NOTES[spec.target_label]},
+                      **task_instructions(spec.target_label, spec.motion_condition,
+                                          spec.trial_type)},
             "protocol": {"settings": st.to_dict(), "phase_order": list(PHASES),
                          "planned_durations_s": dict(st.durations()),
                          "planned_total_s": st.total_s,

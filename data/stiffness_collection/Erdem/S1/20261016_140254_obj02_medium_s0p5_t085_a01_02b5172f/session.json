@@ -1,0 +1,60 @@
+{
+  "session_id": "4f590f1d70ee",
+  "app_version": "0.0.1",
+  "started": "2026-10-16T14:02:54.728",
+  "start_host_time": 1792184574.728829,
+  "name": "obj02_medium_s0p5_t085_a01_02b5172f",
+  "device": {
+    "name": "gForceUltra",
+    "address": "BC:93:2A:3F:80:E4",
+    "model": "OB6000",
+    "firmware": "V1.0.4_2026-08-21_7ed10b5",
+    "hardware": "1.40",
+    "emg_channels": 8,
+    "imu_channels": 6,
+    "mtu": 247,
+    "backend": "dongle",
+    "package_samples": 16
+  },
+  "emg_rate": 1000.0,
+  "imu_rate": 200.0,
+  "onboard_filters": {
+    "FILTER_50HZ": true,
+    "FILTER_60HZ": true,
+    "FILTER_HPF": true,
+    "FILTER_LPF": true
+  },
+  "stiffness_collection": {
+    "attempt_id": "02b5172f",
+    "trial_id": "t085",
+    "sidecar": "trial.json",
+    "data_source": "real"
+  },
+  "stopped": "2026-10-16T14:03:22.854",
+  "duration_s": 28.076,
+  "state": "saved",
+  "error": "",
+  "counts": {
+    "emg": {
+      "received": 14080,
+      "enqueued": 14080,
+      "dropped": 0,
+      "written": 14080,
+      "rejected": 0
+    },
+    "imu": {
+      "received": 2803,
+      "enqueued": 2803,
+      "dropped": 0,
+      "written": 2803,
+      "rejected": 0
+    },
+    "markers": {
+      "received": 7,
+      "enqueued": 7,
+      "dropped": 0,
+      "written": 7,
+      "rejected": 0
+    }
+  }
+}

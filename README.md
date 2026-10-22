@@ -6,7 +6,7 @@ Python package, PyQt5 and pyqtgraph.
 
 ## Setup
 
-Requires Python ≥ 3.10 and git. `sensor-sdk` ships wheels for **Linux x86_64/arm64,
+Requires Python ≥ 3.10 (3.12–3.14 for the Live Classifier) and git. `sensor-sdk` ships wheels for **Linux x86_64/arm64,
 Windows x64 and macOS on Apple Silicon (arm64)**; Intel Macs and 32-bit/ARM Windows are
 not supported by the SDK.
 
@@ -49,7 +49,7 @@ In PowerShell:
 ```powershell
 git clone https://github.com/ErdemTel/gforce-emg-ui.git
 cd gforce-emg-ui
-py -3.12 -m venv .venv                # python.org installer; any 3.10+ works
+py -3.13 -m venv .venv                # 64-bit python.org installer; 3.12–3.14 for the Live Classifier
 .venv\Scripts\python -m pip install -e ".[dev]"
 .venv\Scripts\python -m gforce_emg_ui --simulate
 ```
@@ -88,6 +88,7 @@ callback, default 16; lower = less latency, the vendor demo uses 32), `--data-di
 | **Battery** | Percentage bar, updated by the band |
 | **Settings** | EMG sample rate 500/1000 Hz, on-board filters (50/60 Hz notch, 10 Hz HPF, 200 Hz LPF) |
 | **Recording** | Two subtabs sharing one recorder: **Manual** (CSV session folders with markers, Ctrl+M) and **Stiffness Collection** (guided, timed, labelled trials; see below) |
+| **Live Classifier** | Frozen effort model's live output s = 0 / 0.5 / 1 (or `s = --`), class probabilities, history, host-side timings; see below |
 | **Status bar** | Actual vs nominal rates (red warning on mismatch), lost packets/samples, index gaps, segment, callback gap p95, host-only callback→draw age; sensor→host latency is reported as not measured |
 
 ## Recordings
@@ -152,8 +153,9 @@ amplitude are never checked: contact (even red) is only recorded in `trial.json`
 reset, recorder or trial.json error, phase overrun > 1 s, manual Stop, Disconnect, closing
 the app. Lost/invalid samples and gaps during HOLD flag it; flagged HOLDs cannot be accepted.
 
-**Plan** (*Mode → Plan*, *New…*): 200 accepted development trials per participant, seeded
-order, no target run > 2, saved before the first trial, resumed in later sessions. Each
+**Plan** (*Mode → Plan*, *New…*): 200 accepted development trials per participant (+30
+Surface Press, +35 Open hand: below), seeded order, no target run > 2, saved before the first
+trial, resumed in later sessions. Each
 condition × target cell is split over the four movements (≥ 2 each; 50 per movement).
 Older plan files without movement are used unchanged; their trials are recorded stationary.
 
@@ -169,9 +171,111 @@ attempts are kept: Reject, Repeat or closing the app before review deletes the a
 folder. Every attempt is a new folder. Progress is recomputed from `trial.json` files.
 *Mode → Manual* is for practice / held-out tests (never counted).
 
+**Edit the next trial** (Plan mode, idle): Object, Target and Movement show the random pick.
+Changing one changes only that field, for the next trial only; the app then uses a remaining
+planned trial with exactly that object / target / movement (lowest plan index; its trial ID
+may change, the plan file never does, the displaced pick stays pending). Posture follows the
+object. No match: Start stays disabled with the reason; change a field or *Reset edits*
+(back to the original pick). An explicitly chosen object may be unticked (warned, this trial
+only). Edits end with Accept / Reject and when the mode, participant, session, plan or
+output changes; Repeat keeps them. Example: pick `t045 obj03 / medium / reach_sweep`, Object →
+obj02 gives e.g. `t017 obj02 / medium / reach_sweep`.
+
+`trial.json` `selection.mode`: `automatic` (missing in older files) or `manual_override`, with
+`rule`, `automatic_proposal` (trial, values, how it was drawn), `edited_fields`,
+`differing_fields`, `enforced_fields`, `requested`, `resolved`, `available_objects`,
+`availability_bypass`, `ordering_preference_bypass`, `recent_targets`, `repeat`.
+Schema / protocol versions unchanged.
+
+### Surface Press
+
+Task condition `surface_press` (*Surface Press (Desk)*): the index fingertip presses on a
+desk, always stationary, posture `index_finger_press`. Same protocol, recorder, labels
+(low/medium/high = s 0/0.5/1, instructed effort, not measured force) and review as the
+grasp trials; only the instructions differ:
+
+| phase / target | instruction (shown and saved in `trial.json`) |
+|---|---|
+| PREPARE | fingertip lightly on the marked area, slight finger bend, steady wrist, forearm supported without pressing the armband, no body weight on the finger |
+| LOW | light contact, no intentional downward pressure |
+| MEDIUM | comfortable, repeatable moderate press, same finger and wrist position |
+| HIGH | firm, comfortable, repeatable press; not maximal, no body weight |
+| SETTLE / HOLD / REST | establish / keep / release the pressing effort |
+
+**Add the trials to an existing plan** (once): select the plan → *Protocol & plan settings* →
+**Add 30 Surface Press Trials** → confirm (shows plan ID and totals, e.g. 200 → 230).
+Appends 10 low, 10 medium, 10 high (`t201`–`t230`, or the next free IDs), seeded order. The
+plan ID, the first 200 trials, accepted recordings and progress stay as they are. The old file is copied
+to `plan_backups/` first, then replaced atomically; a failed write leaves it unchanged.
+A second click only says the plan is already extended; non-standard plans are refused.
+Extended plans are `schema_version` 3, so older app versions refuse to load them.
+
+**Record:** tick **Surface Press (Desk)** under *Available objects* to let the random pick
+choose remaining surface-press trials (unticked: they stay in the plan, not picked).
+Or set *Object* to `surface_press` for the next trial: the target is kept and the movement
+is set to stationary (another movement is refused). Changing only the target of a proposed
+surface-press trial keeps the condition. Progress shows
+`Surface Press: LOW x/10 · MEDIUM y/10 · HIGH z/10 · total n/30` (accepted only).
+
+`trial.json` adds `condition.trial_type` (`surface_press` or `grasp`) and
+`label.task_instruction_version` (`surface-press/1`, `grasp/1`); raw CSVs are unchanged.
+The classifier (`emg-stiffness-data`) reads these trials and does not filter by object:
+accepted presses train with the grasps under the same LOW/MEDIUM/HIGH labels.
+
+### Open hand
+
+Task condition `open_hand` (*Open hand (no object)*): like empty hand, but the hand stays
+comfortably open (no fist, no object), posture `open_hand`, all four movements. Same
+protocol, recorder, labels and review. LOW is instructed relaxation; MEDIUM / HIGH are
+forearm contractions with the hand still open (not measured force or co-contraction).
+
+| phase / target | instruction (shown and saved in `trial.json`) |
+|---|---|
+| PREPARE | hand comfortably open, natural slight finger curve (not forced straight or spread), consistent arm position, nothing pressed; stationary: forearm may be supported without pressing the armband |
+| LOW | relax hand and forearm as far as the posture allows; no tensing, squeezing, pressing or spreading |
+| MEDIUM | comfortable, repeatable moderate forearm contraction; hand open, no fist, nothing pressed |
+| HIGH | firm, comfortable, repeatable contraction, same open hand; not maximal, joints not forced straight |
+| SETTLE | LOW: relax; MEDIUM / HIGH: establish the contraction (moving: start the movement) |
+| HOLD / REST | keep the state with the hand open (moving: keep moving, effort unchanged) / release and rest |
+
+Stationary LOW = quiet relaxation. Moving LOW = no added hand or grip tension while moving;
+the movement itself still uses forearm muscles. `motion_condition` keeps them apart in the
+data. A fist during MEDIUM / HIGH means the trial was not performed as instructed: Reject or
+Repeat with *Wrong posture*.
+
+**Add the trials** (once): select the plan → *Protocol & plan settings* → **Add 35 Open-Hand
+Trials** → confirm. The dialog shows the plan ID, the actual totals (200 → 235, or 230 → 265
+after Surface Press) and the allocation (15 / 10 / 10 in total, split evenly over the plan's
+movements, so only 4 stationary relaxed LOW):
+
+| movement | LOW | MEDIUM | HIGH |
+|---|---|---|---|
+| stationary | 4 | 3 | 2 |
+| wrist flex/ext | 4 | 2 | 3 |
+| forearm rotation | 4 | 2 | 3 |
+| reach/sweep | 3 | 3 | 2 |
+
+New trials get the next free IDs (e.g. `t231`–`t265`) in a seeded order; earlier trials,
+extension records, recordings and progress stay as they are; backup
+`plan_backups/<plan>.before-open-hand.json`. Either order with Surface Press works, each
+once. Plans with open hand are `schema_version` 4 (older app versions refuse them);
+inconsistent or partly extended plans are refused with the reason, never repaired.
+
+**Record:** tick **Open hand (no object)** (opt-in, like Surface Press) or set *Object* to
+`open_hand`: target and movement are kept, posture becomes `open_hand`; without a remaining
+trial for that target / movement Start stays disabled with the reason. Progress shows
+`Open hand: LOW x/15 · MEDIUM y/10 · HIGH z/10 · total n/35` (accepted only).
+
+`trial.json`: `condition.object_id` / `trial_type` / `posture_id` = `open_hand`, the actual
+`motion_condition`, `label.task_instruction_version` = `open-hand/1`, the exact instructions
+and operator note; same class / s mapping and `label_source`. The live model does not learn
+from new recordings: copy accepted trials to `emg-stiffness-data` and retrain before they can
+affect live predictions (its reports list `open_hand` as its own object).
+
 ```
 <data-dir>/stiffness_collection/P01/
   plan_plan-1a2b3c4d.json
+  plan_backups/plan_plan-1a2b3c4d.before-surface-press.json   (and .before-open-hand.json)
   S01/20261015_134056_obj05_medium_s0p5_t001_a01_f889bbb8/
     emg.csv imu.csv contact.csv markers.csv session.json trial.json
 <data-dir>/stiffness_collection/simulated/...      simulator data, never real
@@ -185,6 +289,67 @@ receipt time: trim boundaries when processing).
 **First hardware session:** check rate/filters, run a few practice trials per target,
 inspect their `emg.csv` / `markers.csv` / `trial.json`, confirm no false stale aborts with
 the 0.5 s limit, then start the plan.
+
+## Research data in git
+
+`data/` (recordings, `stiffness_collection/`, plans, backups, `trial.json`, CSVs, binary
+recordings) is no longer git-ignored; credentials, `.env`, venvs, logs, `live_logs/` and
+models stay ignored. Un-ignoring uploads nothing: add data explicitly.
+
+```bash
+GH_CONFIG_DIR=~/erdem/.config/gh gh repo view --json visibility   # must be PRIVATE
+git status --short data/
+git add data/stiffness_collection/<P>/   # review first; never `git add .`
+git commit -m "Add <P> trials" && git push
+```
+
+Private is not anonymous: participant IDs (folder names, `trial.json`) and the band's MAC
+address (`session.json`) are in the files. Size: ~2.6 MB per trial (~0.5 MB compressed),
+largest file 11 MB; 265 trials ≈ 0.7 GB raw. Plain git is fine at this size; consider
+Git LFS if single files approach 50 MB or the repo grows to several GB.
+
+## Live classifier
+
+Display-only. Shows the frozen [emg-classifier](https://github.com/ErdemTel/emg-stiffness-data)
+model's prediction of the **instructed effort** class from the live EMG: s = 0 (low),
+0.5 (medium), 1 (high), or `s = --` when there is no fresh valid prediction. Not measured
+stiffness. Low was trained as minimal effort *with the grasp kept*; a relaxed/open hand is
+not validated.
+
+Install the classifier into this `.venv` (pins = the model's training environment; nothing
+else is upgraded). Clone the private data repo next to this one
+(`git clone -b classifier https://github.com/ErdemTel/emg-stiffness-data.git`; it contains the
+models `runs/lda_hold_001/model.joblib` (LDA) and `runs/mlp_hold_30w_seed42_001/model.joblib`
+(MLP); both are accepted), then from this folder (Windows: same
+commands in PowerShell with `.venv\Scripts\pip`). Needs a 64-bit Python 3.12–3.14 `.venv` (the pinned
+numpy / scipy have no older wheels; pip then reports a numpy "conflict"):
+
+```bash
+git --git-dir=../emg-stiffness-data/.git archive -o ../clf.tar classifier pyproject.toml README.md src
+mkdir ../clf
+tar -xf ../clf.tar -C ../clf
+.venv/bin/pip wheel --no-deps -w ../clf/wheels ../clf
+.venv/bin/pip install -c constraints-live.txt ../clf/wheels/emg_classifier-0.1.0-py3-none-any.whl
+```
+
+Use: connect the band → **Live Classifier** → *Load model…* (a trusted local
+`model.joblib`; joblib/pickle runs code, nothing loads automatically) → review
+*Compatibility* (incompatible settings block Start; warnings need a tick) → *Start* →
+warm-up → comfortable low / medium / high effort → *Stop*.
+
+- Windows and hop come from the model (sample counts, e.g. 100 / 25); features and
+  probabilities come from the classifier's own `predict_windows`. Raw output: no smoothing,
+  voting, rest gate or thresholds.
+- Lost/invalid/non-finite samples, index gaps, segment or stream changes, dropped input and
+  stale input (> 0.5 s, to verify on the band) reset the window; a reconnect resets it,
+  a disconnect or a filter/rate change stops it.
+- *Log predictions* writes `predictions.csv`, `events.csv`, `display.csv` and `run.json` to a
+  new folder under `live_logs/` (git-ignored). No labels are recorded.
+- Timings shown are host-side only (not sensor-to-display latency).
+
+Disable: `.venv/bin/pip uninstall emg-classifier` (the tab then says so; recording is
+unaffected). Remove: delete `src/gforce_emg_ui/live/`, `ui/live_view.py`,
+`tests/test_live_*.py`, `constraints-live.txt` and the `live` lines in `ui/main_window.py`.
 
 ## Connection states
 
@@ -202,6 +367,8 @@ band (BLE) ─► SdkSource._on_data (SDK thread: copy out of native buffers, ma
                  │                                                (Qt timer ~30 FPS, visible tab,
                  │                                                 skipped when nothing changed)
                  ├──► Recorder session (bounded queue → writer thread)
+                 ├──► LiveEngine (bounded inbox → worker: windows → frozen model;
+                 │                watchdog; latest result read by the Live Classifier tab)
                  └──► subscribe_emg_async(decoder) (own thread, bounded queue)
 ```
 
@@ -220,8 +387,18 @@ and counted. Features live in `features.py` (`ac_rms` excludes invalid samples).
 ```bash
 .venv/bin/python -m pytest                     # unit + regression + fault-injection tests
 .venv/bin/python -m pytest tests/test_collection_*.py   # stiffness collection only
+.venv/bin/python -m pytest tests/test_collection_selection.py   # next-trial edits
+.venv/bin/python -m pytest tests/test_collection_surface.py     # surface press, plan extension
+.venv/bin/python -m pytest tests/test_collection_open_hand.py   # open hand, both extensions
 .venv/bin/python -m gforce_emg_ui.bench        # host-only benchmark (add --quick, --json out.json)
+.venv/bin/python -m pytest tests/test_live_*.py           # live classifier
+.venv/bin/python -m gforce_emg_ui.live.bench --model PATH # live classifier, simulated bursts
 ```
+
+Real-model live tests use `../emg-stiffness-data/runs/lda_hold_001/model.joblib`,
+`../emg-stiffness-data/runs/mlp_hold_30w_seed42_001/model.joblib` and
+`../emg-stiffness-data/Erdem` (override with `GFORCE_LIVE_MODEL`, `GFORCE_LIVE_MLP_MODEL`,
+`GFORCE_LIVE_DATA`) and are skipped when absent.
 
 The benchmark uses simulated data only. It does **not** measure the band, BLE throughput or
 end-to-end sensor latency.

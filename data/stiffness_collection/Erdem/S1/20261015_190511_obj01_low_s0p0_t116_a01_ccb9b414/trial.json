@@ -1,0 +1,591 @@
+{
+  "schema": "gforce_emg_ui.stiffness_trial",
+  "schema_version": 2,
+  "protocol_version": "stiffness-phase0/1.2",
+  "software": {
+    "app": "gforce-emg-ui",
+    "app_version": "0.0.1",
+    "git": {
+      "revision": "c0eafc229d3f557f6648157f238b7febacce936e",
+      "dirty": true
+    }
+  },
+  "status": "reviewed",
+  "attempt_id": "ccb9b414",
+  "attempt_number": 1,
+  "trial_id": "t116",
+  "plan_id": "plan-1a6fd0c9",
+  "planned_trial_index": 116,
+  "selection": {
+    "rule": "random-available/no-target-run-over-2/v1",
+    "available_objects": [
+      "obj01"
+    ],
+    "empty_hand_always_eligible": true,
+    "eligible": 66,
+    "recent_targets": [
+      "low",
+      "medium"
+    ],
+    "key": "7",
+    "excluded_index": null
+  },
+  "participant_id": "Erdem",
+  "collection_session_id": "S1",
+  "dataset_role": "development",
+  "data_source": "real",
+  "is_simulation": false,
+  "condition": {
+    "object_id": "obj01",
+    "object_name": "Object 1",
+    "motion_condition": "forearm_rotation",
+    "posture_id": "grasp",
+    "posture_description": "Grasp the object",
+    "hand_side": "right"
+  },
+  "notes": "",
+  "motion": {
+    "motion_condition": "forearm_rotation",
+    "display": "Forearm rotation",
+    "instruction_version": "motion/1",
+    "movement_instruction": "slowly turn the forearm palm-up and palm-down through a comfortable range",
+    "movement_phases": [
+      "SETTLE",
+      "HOLD"
+    ]
+  },
+  "label": {
+    "target_label": "low",
+    "target_class_id": 0,
+    "target_s": 0.0,
+    "label_source": "instructed_effort",
+    "semantics": "Instructed effort level / intended robot gain command. NOT measured physical human stiffness, force, %MVC, EMG amplitude or verified co-contraction.",
+    "mapping": {
+      "low": {
+        "target_class_id": 0,
+        "target_s": 0.0
+      },
+      "medium": {
+        "target_class_id": 1,
+        "target_s": 0.5
+      },
+      "high": {
+        "target_class_id": 2,
+        "target_s": 1.0
+      }
+    },
+    "target_instruction": "Keep the selected grasp/fist with the minimum comfortable effort needed. Do not open the hand.",
+    "participant_instructions": {
+      "PREPARE": "Position your hand/object. Keep the intended hand shape with minimal comfortable tension. Movement this trial: forearm rotation (starts in SETTLE).",
+      "SETTLE": "Smoothly establish LOW effort and begin the movement: slowly turn the forearm palm-up and palm-down through a comfortable range. Keep the selected grasp/fist with the minimum comfortable effort needed. Do not open the hand.",
+      "HOLD": "Maintain LOW effort while you continue the movement: slowly turn the forearm palm-up and palm-down through a comfortable range. Keep the same grasp/hand shape.",
+      "REST": "Stop the movement, release the effort and rest. Set down/support the object as needed.",
+      "ABORTED": "Trial stopped. Stop moving, release the effort and rest."
+    },
+    "operator_note": "s=0 is not an open hand: the participant keeps the selected grasp/fist."
+  },
+  "protocol": {
+    "settings": {
+      "prepare_s": 5.0,
+      "settle_s": 3.0,
+      "hold_s": 5.0,
+      "rest_s": 15.0,
+      "rest_extension_s": 15.0,
+      "readiness_s": 3.0,
+      "emg_freshness_s": 0.5,
+      "overrun_flag_s": 0.2,
+      "overrun_abort_s": 1.0,
+      "hold_quality_tail_s": 0.5,
+      "audio_cues": false
+    },
+    "phase_order": [
+      "PREPARE",
+      "SETTLE",
+      "HOLD",
+      "REST"
+    ],
+    "planned_durations_s": {
+      "PREPARE": 5.0,
+      "SETTLE": 3.0,
+      "HOLD": 5.0,
+      "REST": 15.0
+    },
+    "planned_total_s": 28.0,
+    "training_candidate_phase": "HOLD",
+    "markers": "markers.csv labels PREPARE_START, SETTLE_START, HOLD_START, HOLD_END, REST_START, REST_END, REST_EXTENDED, ABORT, TRIAL_END (same host_time/host_mono as timing.events)"
+  },
+  "time_semantics": {
+    "host_mono": "time.monotonic() seconds on the acquisition host; the same timebase as host_mono in emg.csv, imu.csv and markers.csv. Use for durations and for selecting intervals.",
+    "host_time": "time.time() wall clock (Unix seconds); for cross-referencing only, it can jump.",
+    "phase_events": "When the app processed the phase transition and requested the visual (and optional audio) cue. Display and speaker onset are NOT measured.",
+    "emg_receipt": "emg.csv host_time/host_mono is the receipt time of a whole batch on the host, not a per-sample acquisition time; samples were acquired earlier (BLE batching, ~150 ms delivery bursts observed on our band).",
+    "device_time": "SDK value derived from sample_index / nominal rate; not a calibrated hardware clock.",
+    "last_received_emg": "Segment / sample index of the last EMG batch RECEIVED when an event was processed: a reference, not an exact physiological boundary. Exclude windows near phase boundaries when processing.",
+    "not_measured": "Sensor-to-host latency, display/audio latency and camera/robot synchronization are not measured."
+  },
+  "recording": {
+    "folder": "20261015_190511_obj01_low_s0p0_t116_a01_ccb9b414",
+    "recorder_session_id": "d40ddb575cea",
+    "files": [
+      "emg.csv",
+      "imu.csv",
+      "contact.csv",
+      "markers.csv",
+      "session.json",
+      "trial.json"
+    ],
+    "recorder_state": "saved",
+    "recorder_counts": {
+      "emg": {
+        "received": 14112,
+        "enqueued": 14112,
+        "dropped": 0,
+        "written": 14112,
+        "rejected": 0
+      },
+      "imu": {
+        "received": 2807,
+        "enqueued": 2807,
+        "dropped": 0,
+        "written": 2807,
+        "rejected": 0
+      },
+      "markers": {
+        "received": 7,
+        "enqueued": 7,
+        "dropped": 0,
+        "written": 7,
+        "rejected": 0
+      }
+    }
+  },
+  "acquisition": {
+    "device": {
+      "name": "gForceUltra",
+      "address": "BC:93:2A:3F:80:E4",
+      "model": "OB6000",
+      "firmware": "V1.0.4_2026-08-21_7ed10b5",
+      "hardware": "1.40",
+      "emg_channels": 8,
+      "imu_channels": 6,
+      "mtu": 247,
+      "backend": "dongle",
+      "package_samples": 16
+    },
+    "backend": "dongle",
+    "emg_rate_requested_hz": 1000,
+    "emg_rate_readback_hz": 1000,
+    "emg_rate_reported_by_stream_hz": 1000.0,
+    "imu_rate_reported_by_stream_hz": 200.0,
+    "received_rates_at_start_hz": {
+      "emg": 514.4798110766361,
+      "imu": 103.97492409826364
+    },
+    "rate_note": "received rate is host throughput, not a verified acquisition rate (~505 of nominal 1000 Hz observed on FW V1.0.4)",
+    "onboard_filters_readback": {
+      "FILTER_50HZ": true,
+      "FILTER_60HZ": true,
+      "FILTER_HPF": true,
+      "FILTER_LPF": true
+    },
+    "emg_channel_order": [
+      "ch1",
+      "ch2",
+      "ch3",
+      "ch4",
+      "ch5",
+      "ch6",
+      "ch7",
+      "ch8"
+    ],
+    "emg_units": "unknown (SDK 'data' field; not verified)",
+    "impedance_units": "ohm as reported by the SDK (latest cached value; measurement time/age not exposed by the SDK)",
+    "imu_channel_order": [
+      "ACC-X",
+      "ACC-Y",
+      "ACC-Z",
+      "GYRO-X",
+      "GYRO-Y",
+      "GYRO-Z"
+    ],
+    "imu_units": "unknown",
+    "received_rates_at_stop_hz": {
+      "emg": 512.5210219439823,
+      "imu": 103.46824512512326
+    }
+  },
+  "readiness": {
+    "settings": {
+      "readiness_s": 3.0,
+      "emg_freshness_s": 0.5,
+      "contact_rule": "all 8 channels GOOD or MARGINAL by contact_level() (<= 999 kOhm); POOR or invalid/unknown blocks"
+    },
+    "initial_snapshot": {
+      "ready": true,
+      "stream_contact_ok": true,
+      "stable_for_s": 67.9298556369904,
+      "required_s": 3.0,
+      "blockers": [],
+      "contact_levels": {
+        "ch1": "good",
+        "ch2": "good",
+        "ch3": "good",
+        "ch4": "good",
+        "ch5": "good",
+        "ch6": "good",
+        "ch7": "good",
+        "ch8": "good"
+      },
+      "impedance_ohm": {
+        "ch1": 188735.3125,
+        "ch2": 196609.71875,
+        "ch3": 195013.21875,
+        "ch4": 143750.140625,
+        "ch5": 134308.21875,
+        "ch6": 152370.03125,
+        "ch7": 122359.921875,
+        "ch8": 151432.421875
+      },
+      "emg_age_s": 0.05501856899354607,
+      "segment": 1,
+      "source_state": "streaming"
+    }
+  },
+  "timing": {
+    "start": {
+      "host_mono": 189841.599016204,
+      "host_time": 1792116311.5293062
+    },
+    "end": {
+      "host_mono": 189869.717215881,
+      "host_time": 1792116339.6475067
+    },
+    "events": [
+      {
+        "name": "PREPARE_START",
+        "host_mono": 189841.599016204,
+        "host_time": 1792116311.5293062,
+        "phase_after": "PREPARE",
+        "detail": {},
+        "cue": {
+          "visual": "requested"
+        },
+        "last_received_emg": {
+          "segment": 1,
+          "sample_index": 209887,
+          "receipt_host_mono": 189841.543186144
+        }
+      },
+      {
+        "name": "SETTLE_START",
+        "host_mono": 189846.616705588,
+        "host_time": 1792116316.546997,
+        "phase_after": "SETTLE",
+        "detail": {},
+        "cue": {
+          "visual": "requested"
+        },
+        "last_received_emg": {
+          "segment": 1,
+          "sample_index": 212415,
+          "receipt_host_mono": 189846.549273933
+        }
+      },
+      {
+        "name": "HOLD_START",
+        "host_mono": 189849.626769679,
+        "host_time": 1792116319.5570612,
+        "phase_after": "HOLD",
+        "detail": {},
+        "cue": {
+          "visual": "requested"
+        },
+        "last_received_emg": {
+          "segment": 1,
+          "sample_index": 213935,
+          "receipt_host_mono": 189849.584568026
+        }
+      },
+      {
+        "name": "HOLD_END",
+        "host_mono": 189854.667429439,
+        "host_time": 1792116324.597721,
+        "phase_after": "REST",
+        "detail": {},
+        "cue": {
+          "visual": "requested"
+        },
+        "last_received_emg": {
+          "segment": 1,
+          "sample_index": 216463,
+          "receipt_host_mono": 189854.600393465
+        }
+      },
+      {
+        "name": "REST_START",
+        "host_mono": 189854.667429439,
+        "host_time": 1792116324.597721,
+        "phase_after": "REST",
+        "detail": {},
+        "cue": {
+          "visual": "requested"
+        },
+        "last_received_emg": {
+          "segment": 1,
+          "sample_index": 216463,
+          "receipt_host_mono": 189854.600393465
+        }
+      },
+      {
+        "name": "REST_END",
+        "host_mono": 189869.717215881,
+        "host_time": 1792116339.6475067,
+        "phase_after": "DONE",
+        "detail": {},
+        "cue": {
+          "visual": "requested"
+        },
+        "last_received_emg": {
+          "segment": 1,
+          "sample_index": 223999,
+          "receipt_host_mono": 189869.635519276
+        }
+      },
+      {
+        "name": "TRIAL_END",
+        "host_mono": 189869.717215881,
+        "host_time": 1792116339.6475067,
+        "phase_after": "DONE",
+        "detail": {},
+        "cue": {
+          "visual": "requested"
+        },
+        "last_received_emg": {
+          "segment": 1,
+          "sample_index": 223999,
+          "receipt_host_mono": 189869.635519276
+        }
+      }
+    ],
+    "phases": [
+      {
+        "phase": "PREPARE",
+        "start_host_mono": 189841.599016204,
+        "start_host_time": 1792116311.5293062,
+        "planned_s": 5.0,
+        "end_host_mono": 189846.616705588,
+        "end_host_time": 1792116316.546997,
+        "actual_s": 5.017689383996185,
+        "overrun_s": 0.017689383996184915,
+        "max_tick_gap_s": 0.06197656999574974,
+        "completed": true
+      },
+      {
+        "phase": "SETTLE",
+        "start_host_mono": 189846.616705588,
+        "start_host_time": 1792116316.546997,
+        "planned_s": 3.0,
+        "end_host_mono": 189849.626769679,
+        "end_host_time": 1792116319.5570612,
+        "actual_s": 3.0100640909804497,
+        "overrun_s": 0.010064090980449691,
+        "max_tick_gap_s": 0.05991021997760981,
+        "completed": true
+      },
+      {
+        "phase": "HOLD",
+        "start_host_mono": 189849.626769679,
+        "start_host_time": 1792116319.5570612,
+        "planned_s": 5.0,
+        "end_host_mono": 189854.667429439,
+        "end_host_time": 1792116324.597721,
+        "actual_s": 5.040659760008566,
+        "overrun_s": 0.04065976000856608,
+        "max_tick_gap_s": 0.0599020570225548,
+        "completed": true
+      },
+      {
+        "phase": "REST",
+        "start_host_mono": 189854.667429439,
+        "start_host_time": 1792116324.597721,
+        "planned_s": 15.0,
+        "end_host_mono": 189869.717215881,
+        "end_host_time": 1792116339.6475067,
+        "actual_s": 15.049786442017648,
+        "overrun_s": 0.04978644201764837,
+        "max_tick_gap_s": 0.06067837099544704,
+        "completed": true
+      }
+    ],
+    "flags": [],
+    "stop_requested": {
+      "host_mono": 189869.717266559,
+      "host_time": 1792116339.6475565
+    },
+    "protocol_duration_s": 28.11819967700285,
+    "recorder_duration_s": 28.11874460199033,
+    "rest_extensions": 0
+  },
+  "training_candidate": {
+    "phase": "HOLD",
+    "start_marker": "HOLD_START",
+    "end_marker": "HOLD_END",
+    "eligible": true,
+    "quality_status": "clean",
+    "quality_flags": [],
+    "start_host_mono": 189849.626769679,
+    "end_host_mono": 189854.667429439,
+    "motion_condition": "forearm_rotation",
+    "note": "Candidate interval only: it does not assert that the participant achieved the instructed effort. PREPARE, SETTLE and REST are never training data for the target. HOLD = maintain the instructed effort (during the instructed movement, if any), not 'stay still'.",
+    "start_host_time": 1792116319.5570612,
+    "end_host_time": 1792116324.597721,
+    "duration_s": 5.040659760008566,
+    "planned_s": 5.0,
+    "quality_window_tail_s": 0.5
+  },
+  "quality": {
+    "trial": {
+      "window_host_mono": [
+        189841.599016204,
+        189869.717215881
+      ],
+      "batches": 882,
+      "samples": 14112,
+      "lost_samples": 0,
+      "samples_with_invalid_channels": 0,
+      "batches_missing_channels": 0,
+      "index_gaps": 0,
+      "missing_samples": 0,
+      "segment_changes": 0,
+      "segments": [
+        1
+      ],
+      "max_receipt_gap_s": 0.15149679698515683,
+      "contact_levels_seen": {
+        "ch1": [
+          "good"
+        ],
+        "ch2": [
+          "good"
+        ],
+        "ch3": [
+          "good"
+        ],
+        "ch4": [
+          "good"
+        ],
+        "ch5": [
+          "good"
+        ],
+        "ch6": [
+          "good"
+        ],
+        "ch7": [
+          "good"
+        ],
+        "ch8": [
+          "good"
+        ]
+      },
+      "contact_not_ok": [],
+      "contact_marginal": [],
+      "first_sample_index": 209888,
+      "last_sample_index": 223999,
+      "flags": []
+    },
+    "hold": {
+      "window_host_mono": [
+        189849.626769679,
+        189855.167429439
+      ],
+      "batches": 171,
+      "samples": 2736,
+      "lost_samples": 0,
+      "samples_with_invalid_channels": 0,
+      "batches_missing_channels": 0,
+      "index_gaps": 0,
+      "missing_samples": 0,
+      "segment_changes": 0,
+      "segments": [
+        1
+      ],
+      "max_receipt_gap_s": 0.15092597701004706,
+      "contact_levels_seen": {
+        "ch1": [
+          "good"
+        ],
+        "ch2": [
+          "good"
+        ],
+        "ch3": [
+          "good"
+        ],
+        "ch4": [
+          "good"
+        ],
+        "ch5": [
+          "good"
+        ],
+        "ch6": [
+          "good"
+        ],
+        "ch7": [
+          "good"
+        ],
+        "ch8": [
+          "good"
+        ]
+      },
+      "contact_not_ok": [],
+      "contact_marginal": [],
+      "first_sample_index": 213936,
+      "last_sample_index": 216671,
+      "flags": []
+    },
+    "contact_events": [
+      {
+        "host_mono": 189841.543186144,
+        "segment": 1,
+        "levels": [
+          "good",
+          "good",
+          "good",
+          "good",
+          "good",
+          "good",
+          "good",
+          "good"
+        ],
+        "impedance_ohm": [
+          188735.3125,
+          196609.71875,
+          195013.21875,
+          143750.140625,
+          134308.21875,
+          152370.03125,
+          122359.921875,
+          151432.421875
+        ],
+        "initial": true
+      }
+    ],
+    "capture_truncated": false
+  },
+  "outcome": {
+    "protocol": "completed",
+    "abort_reason": null,
+    "abort_reason_text": null,
+    "recorder": "saved",
+    "recorder_error": "",
+    "metadata": "ok"
+  },
+  "review": {
+    "status": "accepted",
+    "decision": "accept",
+    "reasons": [],
+    "comment": "",
+    "reviewed_host_time": 1792116373.9534676,
+    "reviewed_host_mono": 189904.023177921,
+    "reviewer": "operator"
+  }
+}

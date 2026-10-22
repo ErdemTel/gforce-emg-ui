@@ -19,6 +19,7 @@ from .collection_panel import StiffnessCollectionPanel
 from .emg_detail import DetailDashboard
 from .emg_equal import EqualScaleDashboard
 from .imu_view import ImuDashboard
+from .live_view import LiveClassifierDashboard
 
 
 PANEL_WIDTH = 380
@@ -76,10 +77,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.equal = EqualScaleDashboard(hub)
         self.detail = DetailDashboard(hub)
         self.imu = ImuDashboard(hub)
+        self.live = LiveClassifierDashboard(hub, source)
         self.tabs = QtWidgets.QTabWidget()
         self.tabs.addTab(self.equal, "EMG – Equal scale")
         self.tabs.addTab(self.detail, "EMG – Detail")
         self.tabs.addTab(self.imu, "IMU")
+        self.tabs.addTab(self.live, "Live Classifier")
 
         panel = self._build_panel()
         scroll = QtWidgets.QScrollArea()
@@ -526,5 +529,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.plot_timer.stop()
         self.status_timer.stop()
         self.collection_panel.shutdown()
+        self.live.shutdown()
         self.source.shutdown()
         event.accept()

@@ -1,3 +1,4 @@
+# Python, build, IDE
 .venv/
 __pycache__/
 *.pyc
@@ -8,40 +9,19 @@ dist/
 .idea/
 .vscode/
 
-# private notes / AI-assistant context (repo is public)
+# private notes / AI-assistant context
 CLAUDE.md
 CLAUDE.local.md
 memory.md
 MEMORY.md
 .claude/
 
-# recordings, participant data, datasets: never commit
-data/*
-!data/.gitkeep
-recordings/
-datasets/
-stiffness_collection/
-audits/
-session.json
-trial.json
-plan_*.json
-objects.json
-*.csv
-*.tsv
-*.bin
-*.npy
-*.npz
-*.mat
-*.h5
-*.hdf5
-*.parquet
-*.feather
-*.pkl
-*.pickle
-*.edf
-*.bdf
+# Recorded research data is tracked: data/ (recordings, stiffness_collection,
+# audits, plan_*.json, plan_backups/, objects.json, trial.json, session.json,
+# *.csv and binary recordings). Keep the repo private; review before `git add`.
 
-# trained models / training runs
+# generated: trained models, training runs, caches, live classifier logs
+live_logs/
 models/
 checkpoints/
 runs/
@@ -56,9 +36,12 @@ lightning_logs/
 *.safetensors
 *.tflite
 *.keras
+*.pkl
+*.pickle
 
-# logs
+# temporary files and app logs
 *.log
+*.tmp
 
 # credentials
 .env

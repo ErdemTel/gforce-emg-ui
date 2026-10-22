@@ -189,7 +189,7 @@ def main(argv=None) -> int:
     st = res["simulated_stream"]
     age = st["callback_to_draw_age_ms"]
     print(f"simulated stream {st['seconds']:.0f} s: {st['emg_rate_hz']:.1f}/{st['nominal_hz']:g} Hz, "
-          f"callback gap p95 {st['callback_gap_p95_ms']:.1f} ms, callback→draw age "
+          f"callback gap p95 {st['callback_gap_p95_ms']:.1f} ms, callback->draw age "
           + (f"p50 {age['p50']:.1f} / p95 {age['p95']:.1f} ms" if age else "n/a"))
     print(NOTE)
     if args.json:

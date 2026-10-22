@@ -304,7 +304,7 @@ def test_movement_selector_and_moving_instructions_in_the_panel(qapp, tmp_path):
         panel._new_plan(confirm=False)
         assert wait_until(lambda: c.plan is not None, 5, qapp)
         qapp.processEvents()
-        assert not combo.isEnabled()
+        assert combo.isEnabled()                       # editable for the next trial only
         assert combo.currentData() == c.planned_trial()["motion_condition"]
         assert "Movement:" in panel.next_label.text()
     finally:
