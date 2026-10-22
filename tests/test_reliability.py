@@ -275,6 +275,54 @@ def test_sdk_reconnect_gives_up_after_retries(qapp):
     assert states.count(RECONNECTING) >= 1
 
 
+class _RefusesRate(_FakeSensor):
+    """FW V1.0.4: refuses EMG_SAMPLE_RATE=500 and stays at 1000."""
+
+    def setParam(self, key, value):
+        self.calls.append(f"set {key}={value}")
+        if (key, value) == ("EMG_SAMPLE_RATE", "500"):
+            return "Error: not supported on this device"
+        return "OK"
+
+
+def test_sdk_refused_rate_at_connect_follows_band(qapp):
+    first, second = _RefusesRate(None), _RefusesRate(None)
+    src, _ = _sdk_source([first, second])
+    errors = []
+    src.error.connect(errors.append)
+    src.target_emg_rate = 500                      # --emg-rate 500
+    src.connect_device("AA:BB")
+    assert "set EMG_SAMPLE_RATE=500" in first.calls
+    assert any("EMG_SAMPLE_RATE=500" in e for e in errors)
+    assert src.target_emg_rate == 1000
+    first.drop_link()
+    assert src._sensor is second
+    assert not any(c.startswith("set EMG_SAMPLE_RATE") for c in second.calls)
+
+
+def test_sdk_refused_rate_change_reverts_target(qapp, tmp_path):
+    """The radio snapped back to 1000 but the target stayed 500, so the live
+    classifier blocked on 'EMG rate requested' until the app was restarted."""
+    from gforce_emg_ui.live import compat
+    from gforce_emg_ui.ui.main_window import MainWindow
+    sensor = _RefusesRate(None)
+    src, _ = _sdk_source([sensor])
+    win = MainWindow(src.hub, src, tmp_path)
+    try:
+        src.connect_device("AA:BB")
+        qapp.processEvents()
+        win.rate_buttons[500].click()
+        qapp.processEvents()
+        assert "set EMG_SAMPLE_RATE=500" in sensor.calls
+        assert src.target_emg_rate == 1000
+        assert win.current_params["emg_rate"] == 1000 and win.rate_buttons[1000].isChecked()
+        live = compat.live_acquisition(win.device_summary, win.current_params, src, src.hub)
+        assert live["emg_rate_requested_hz"] == live["emg_rate_readback_hz"] == 1000
+    finally:
+        src.disconnect_device()
+        win.close()
+
+
 # -- redraw avoidance ------------------------------------------------------------
 
 def test_dashboards_skip_redraw_without_new_data_or_settings(qapp):

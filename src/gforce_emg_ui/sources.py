@@ -178,9 +178,7 @@ class SdkSource(Source):
 
             rate = sensor.getParam("EMG_SAMPLE_RATE")
             if str(rate) != str(self.target_emg_rate):
-                res = sensor.setParam("EMG_SAMPLE_RATE", str(self.target_emg_rate))
-                if str(res).startswith("Error"):
-                    self.error.emit(f"EMG_SAMPLE_RATE={self.target_emg_rate}: {res}")
+                self._apply_emg_rate(sensor, self.target_emg_rate)
             self._ensure_notifications(sensor, ("NTF_EMG", "NTF_IMU"))
 
             if not reconnect:
@@ -326,12 +324,22 @@ class SdkSource(Source):
             return True
 
         def work():
-            res = sensor.setParam("EMG_SAMPLE_RATE", str(rate))
-            if str(res).startswith("Error"):
-                self.error.emit(f"EMG_SAMPLE_RATE={rate}: {res}")
+            self._apply_emg_rate(sensor, rate)
             self._read_params(sensor)
         self._sdk.submit(work)
         return True
+
+    def _apply_emg_rate(self, sensor, rate: int):
+        """Request `rate`. If the band refuses (FW V1.0.4 refuses 500), the
+        target follows the rate it kept, so UI, reconnects and the live
+        compatibility check never show a rate the band is not set to."""
+        res = sensor.setParam("EMG_SAMPLE_RATE", str(rate))
+        if not str(res).startswith("Error"):
+            return
+        self.error.emit(f"EMG_SAMPLE_RATE={rate}: {res}")
+        kept = str(sensor.getParam("EMG_SAMPLE_RATE"))
+        if kept.isdigit() and self.target_emg_rate == rate:    # no newer request
+            self.target_emg_rate = int(kept)
 
     def set_filter(self, key: str, on: bool) -> bool:
         if not self._check_unlocked("Firmware filter"):
