@@ -1,0 +1,1776 @@
+{
+  "schema": "gforce_emg_ui.stiffness_plan",
+  "schema_version": 2,
+  "plan_id": "plan-833f2f8f",
+  "participant_id": "Erdem",
+  "data_source": "real",
+  "dataset_role": "development",
+  "seed": 406092717,
+  "generator": "weighted-random-order/no-target-run-over-2/motion-split/v2",
+  "max_target_run": 2,
+  "created": "2026-10-23T15:28:06",
+  "counts_low_medium_high": {
+    "empty_hand": [
+      13,
+      13,
+      14
+    ],
+    "obj01": [
+      11,
+      11,
+      10
+    ],
+    "obj02": [
+      11,
+      11,
+      10
+    ],
+    "obj03": [
+      11,
+      11,
+      10
+    ],
+    "obj04": [
+      11,
+      10,
+      11
+    ],
+    "obj05": [
+      10,
+      11,
+      11
+    ]
+  },
+  "motion_conditions": [
+    "stationary",
+    "wrist_flex_ext",
+    "forearm_rotation",
+    "reach_sweep"
+  ],
+  "motion_instruction_version": "motion/1",
+  "motion_counts": {
+    "empty_hand": {
+      "low": {
+        "stationary": 4,
+        "wrist_flex_ext": 3,
+        "forearm_rotation": 3,
+        "reach_sweep": 3
+      },
+      "medium": {
+        "stationary": 3,
+        "wrist_flex_ext": 4,
+        "forearm_rotation": 3,
+        "reach_sweep": 3
+      },
+      "high": {
+        "stationary": 3,
+        "wrist_flex_ext": 3,
+        "forearm_rotation": 4,
+        "reach_sweep": 4
+      }
+    },
+    "obj01": {
+      "low": {
+        "stationary": 2,
+        "wrist_flex_ext": 3,
+        "forearm_rotation": 3,
+        "reach_sweep": 3
+      },
+      "medium": {
+        "stationary": 3,
+        "wrist_flex_ext": 3,
+        "forearm_rotation": 3,
+        "reach_sweep": 2
+      },
+      "high": {
+        "stationary": 3,
+        "wrist_flex_ext": 2,
+        "forearm_rotation": 2,
+        "reach_sweep": 3
+      }
+    },
+    "obj02": {
+      "low": {
+        "stationary": 3,
+        "wrist_flex_ext": 2,
+        "forearm_rotation": 3,
+        "reach_sweep": 3
+      },
+      "medium": {
+        "stationary": 2,
+        "wrist_flex_ext": 3,
+        "forearm_rotation": 3,
+        "reach_sweep": 3
+      },
+      "high": {
+        "stationary": 3,
+        "wrist_flex_ext": 3,
+        "forearm_rotation": 2,
+        "reach_sweep": 2
+      }
+    },
+    "obj03": {
+      "low": {
+        "stationary": 3,
+        "wrist_flex_ext": 3,
+        "forearm_rotation": 2,
+        "reach_sweep": 3
+      },
+      "medium": {
+        "stationary": 3,
+        "wrist_flex_ext": 2,
+        "forearm_rotation": 3,
+        "reach_sweep": 3
+      },
+      "high": {
+        "stationary": 2,
+        "wrist_flex_ext": 3,
+        "forearm_rotation": 3,
+        "reach_sweep": 2
+      }
+    },
+    "obj04": {
+      "low": {
+        "stationary": 3,
+        "wrist_flex_ext": 3,
+        "forearm_rotation": 3,
+        "reach_sweep": 2
+      },
+      "medium": {
+        "stationary": 3,
+        "wrist_flex_ext": 2,
+        "forearm_rotation": 2,
+        "reach_sweep": 3
+      },
+      "high": {
+        "stationary": 2,
+        "wrist_flex_ext": 3,
+        "forearm_rotation": 3,
+        "reach_sweep": 3
+      }
+    },
+    "obj05": {
+      "low": {
+        "stationary": 2,
+        "wrist_flex_ext": 3,
+        "forearm_rotation": 3,
+        "reach_sweep": 2
+      },
+      "medium": {
+        "stationary": 3,
+        "wrist_flex_ext": 3,
+        "forearm_rotation": 2,
+        "reach_sweep": 3
+      },
+      "high": {
+        "stationary": 3,
+        "wrist_flex_ext": 2,
+        "forearm_rotation": 3,
+        "reach_sweep": 3
+      }
+    }
+  },
+  "total": 200,
+  "trials": [
+    {
+      "index": 1,
+      "trial_id": "t001",
+      "object_id": "obj02",
+      "posture_id": "grasp",
+      "target_label": "low",
+      "motion_condition": "reach_sweep"
+    },
+    {
+      "index": 2,
+      "trial_id": "t002",
+      "object_id": "empty_hand",
+      "posture_id": "fist",
+      "target_label": "medium",
+      "motion_condition": "reach_sweep"
+    },
+    {
+      "index": 3,
+      "trial_id": "t003",
+      "object_id": "obj05",
+      "posture_id": "grasp",
+      "target_label": "high",
+      "motion_condition": "forearm_rotation"
+    },
+    {
+      "index": 4,
+      "trial_id": "t004",
+      "object_id": "obj02",
+      "posture_id": "grasp",
+      "target_label": "low",
+      "motion_condition": "stationary"
+    },
+    {
+      "index": 5,
+      "trial_id": "t005",
+      "object_id": "empty_hand",
+      "posture_id": "fist",
+      "target_label": "high",
+      "motion_condition": "reach_sweep"
+    },
+    {
+      "index": 6,
+      "trial_id": "t006",
+      "object_id": "empty_hand",
+      "posture_id": "fist",
+      "target_label": "low",
+      "motion_condition": "reach_sweep"
+    },
+    {
+      "index": 7,
+      "trial_id": "t007",
+      "object_id": "empty_hand",
+      "posture_id": "fist",
+      "target_label": "low",
+      "motion_condition": "stationary"
+    },
+    {
+      "index": 8,
+      "trial_id": "t008",
+      "object_id": "obj03",
+      "posture_id": "grasp",
+      "target_label": "medium",
+      "motion_condition": "forearm_rotation"
+    },
+    {
+      "index": 9,
+      "trial_id": "t009",
+      "object_id": "obj01",
+      "posture_id": "grasp",
+      "target_label": "low",
+      "motion_condition": "wrist_flex_ext"
+    },
+    {
+      "index": 10,
+      "trial_id": "t010",
+      "object_id": "obj03",
+      "posture_id": "grasp",
+      "target_label": "high",
+      "motion_condition": "forearm_rotation"
+    },
+    {
+      "index": 11,
+      "trial_id": "t011",
+      "object_id": "empty_hand",
+      "posture_id": "fist",
+      "target_label": "medium",
+      "motion_condition": "wrist_flex_ext"
+    },
+    {
+      "index": 12,
+      "trial_id": "t012",
+      "object_id": "obj02",
+      "posture_id": "grasp",
+      "target_label": "low",
+      "motion_condition": "stationary"
+    },
+    {
+      "index": 13,
+      "trial_id": "t013",
+      "object_id": "obj02",
+      "posture_id": "grasp",
+      "target_label": "low",
+      "motion_condition": "reach_sweep"
+    },
+    {
+      "index": 14,
+      "trial_id": "t014",
+      "object_id": "empty_hand",
+      "posture_id": "fist",
+      "target_label": "high",
+      "motion_condition": "wrist_flex_ext"
+    },
+    {
+      "index": 15,
+      "trial_id": "t015",
+      "object_id": "obj03",
+      "posture_id": "grasp",
+      "target_label": "low",
+      "motion_condition": "forearm_rotation"
+    },
+    {
+      "index": 16,
+      "trial_id": "t016",
+      "object_id": "empty_hand",
+      "posture_id": "fist",
+      "target_label": "medium",
+      "motion_condition": "forearm_rotation"
+    },
+    {
+      "index": 17,
+      "trial_id": "t017",
+      "object_id": "empty_hand",
+      "posture_id": "fist",
+      "target_label": "low",
+      "motion_condition": "wrist_flex_ext"
+    },
+    {
+      "index": 18,
+      "trial_id": "t018",
+      "object_id": "obj01",
+      "posture_id": "grasp",
+      "target_label": "medium",
+      "motion_condition": "wrist_flex_ext"
+    },
+    {
+      "index": 19,
+      "trial_id": "t019",
+      "object_id": "obj01",
+      "posture_id": "grasp",
+      "target_label": "high",
+      "motion_condition": "reach_sweep"
+    },
+    {
+      "index": 20,
+      "trial_id": "t020",
+      "object_id": "obj03",
+      "posture_id": "grasp",
+      "target_label": "high",
+      "motion_condition": "stationary"
+    },
+    {
+      "index": 21,
+      "trial_id": "t021",
+      "object_id": "obj01",
+      "posture_id": "grasp",
+      "target_label": "medium",
+      "motion_condition": "wrist_flex_ext"
+    },
+    {
+      "index": 22,
+      "trial_id": "t022",
+      "object_id": "empty_hand",
+      "posture_id": "fist",
+      "target_label": "low",
+      "motion_condition": "forearm_rotation"
+    },
+    {
+      "index": 23,
+      "trial_id": "t023",
+      "object_id": "obj04",
+      "posture_id": "grasp",
+      "target_label": "low",
+      "motion_condition": "wrist_flex_ext"
+    },
+    {
+      "index": 24,
+      "trial_id": "t024",
+      "object_id": "empty_hand",
+      "posture_id": "fist",
+      "target_label": "high",
+      "motion_condition": "stationary"
+    },
+    {
+      "index": 25,
+      "trial_id": "t025",
+      "object_id": "obj02",
+      "posture_id": "grasp",
+      "target_label": "medium",
+      "motion_condition": "reach_sweep"
+    },
+    {
+      "index": 26,
+      "trial_id": "t026",
+      "object_id": "empty_hand",
+      "posture_id": "fist",
+      "target_label": "medium",
+      "motion_condition": "reach_sweep"
+    },
+    {
+      "index": 27,
+      "trial_id": "t027",
+      "object_id": "obj05",
+      "posture_id": "grasp",
+      "target_label": "low",
+      "motion_condition": "forearm_rotation"
+    },
+    {
+      "index": 28,
+      "trial_id": "t028",
+      "object_id": "obj03",
+      "posture_id": "grasp",
+      "target_label": "high",
+      "motion_condition": "reach_sweep"
+    },
+    {
+      "index": 29,
+      "trial_id": "t029",
+      "object_id": "obj01",
+      "posture_id": "grasp",
+      "target_label": "medium",
+      "motion_condition": "stationary"
+    },
+    {
+      "index": 30,
+      "trial_id": "t030",
+      "object_id": "obj01",
+      "posture_id": "grasp",
+      "target_label": "low",
+      "motion_condition": "forearm_rotation"
+    },
+    {
+      "index": 31,
+      "trial_id": "t031",
+      "object_id": "obj01",
+      "posture_id": "grasp",
+      "target_label": "high",
+      "motion_condition": "forearm_rotation"
+    },
+    {
+      "index": 32,
+      "trial_id": "t032",
+      "object_id": "obj03",
+      "posture_id": "grasp",
+      "target_label": "high",
+      "motion_condition": "forearm_rotation"
+    },
+    {
+      "index": 33,
+      "trial_id": "t033",
+      "object_id": "obj02",
+      "posture_id": "grasp",
+      "target_label": "medium",
+      "motion_condition": "stationary"
+    },
+    {
+      "index": 34,
+      "trial_id": "t034",
+      "object_id": "obj02",
+      "posture_id": "grasp",
+      "target_label": "low",
+      "motion_condition": "forearm_rotation"
+    },
+    {
+      "index": 35,
+      "trial_id": "t035",
+      "object_id": "obj03",
+      "posture_id": "grasp",
+      "target_label": "low",
+      "motion_condition": "wrist_flex_ext"
+    },
+    {
+      "index": 36,
+      "trial_id": "t036",
+      "object_id": "obj05",
+      "posture_id": "grasp",
+      "target_label": "medium",
+      "motion_condition": "wrist_flex_ext"
+    },
+    {
+      "index": 37,
+      "trial_id": "t037",
+      "object_id": "obj01",
+      "posture_id": "grasp",
+      "target_label": "high",
+      "motion_condition": "stationary"
+    },
+    {
+      "index": 38,
+      "trial_id": "t038",
+      "object_id": "empty_hand",
+      "posture_id": "fist",
+      "target_label": "medium",
+      "motion_condition": "forearm_rotation"
+    },
+    {
+      "index": 39,
+      "trial_id": "t039",
+      "object_id": "obj01",
+      "posture_id": "grasp",
+      "target_label": "low",
+      "motion_condition": "reach_sweep"
+    },
+    {
+      "index": 40,
+      "trial_id": "t040",
+      "object_id": "obj03",
+      "posture_id": "grasp",
+      "target_label": "low",
+      "motion_condition": "wrist_flex_ext"
+    },
+    {
+      "index": 41,
+      "trial_id": "t041",
+      "object_id": "empty_hand",
+      "posture_id": "fist",
+      "target_label": "high",
+      "motion_condition": "stationary"
+    },
+    {
+      "index": 42,
+      "trial_id": "t042",
+      "object_id": "obj04",
+      "posture_id": "grasp",
+      "target_label": "medium",
+      "motion_condition": "wrist_flex_ext"
+    },
+    {
+      "index": 43,
+      "trial_id": "t043",
+      "object_id": "obj03",
+      "posture_id": "grasp",
+      "target_label": "low",
+      "motion_condition": "reach_sweep"
+    },
+    {
+      "index": 44,
+      "trial_id": "t044",
+      "object_id": "obj04",
+      "posture_id": "grasp",
+      "target_label": "medium",
+      "motion_condition": "stationary"
+    },
+    {
+      "index": 45,
+      "trial_id": "t045",
+      "object_id": "obj03",
+      "posture_id": "grasp",
+      "target_label": "low",
+      "motion_condition": "forearm_rotation"
+    },
+    {
+      "index": 46,
+      "trial_id": "t046",
+      "object_id": "obj03",
+      "posture_id": "grasp",
+      "target_label": "medium",
+      "motion_condition": "wrist_flex_ext"
+    },
+    {
+      "index": 47,
+      "trial_id": "t047",
+      "object_id": "obj03",
+      "posture_id": "grasp",
+      "target_label": "high",
+      "motion_condition": "wrist_flex_ext"
+    },
+    {
+      "index": 48,
+      "trial_id": "t048",
+      "object_id": "obj01",
+      "posture_id": "grasp",
+      "target_label": "medium",
+      "motion_condition": "stationary"
+    },
+    {
+      "index": 49,
+      "trial_id": "t049",
+      "object_id": "obj01",
+      "posture_id": "grasp",
+      "target_label": "low",
+      "motion_condition": "forearm_rotation"
+    },
+    {
+      "index": 50,
+      "trial_id": "t050",
+      "object_id": "empty_hand",
+      "posture_id": "fist",
+      "target_label": "low",
+      "motion_condition": "stationary"
+    },
+    {
+      "index": 51,
+      "trial_id": "t051",
+      "object_id": "obj02",
+      "posture_id": "grasp",
+      "target_label": "high",
+      "motion_condition": "wrist_flex_ext"
+    },
+    {
+      "index": 52,
+      "trial_id": "t052",
+      "object_id": "obj04",
+      "posture_id": "grasp",
+      "target_label": "high",
+      "motion_condition": "forearm_rotation"
+    },
+    {
+      "index": 53,
+      "trial_id": "t053",
+      "object_id": "obj05",
+      "posture_id": "grasp",
+      "target_label": "medium",
+      "motion_condition": "reach_sweep"
+    },
+    {
+      "index": 54,
+      "trial_id": "t054",
+      "object_id": "empty_hand",
+      "posture_id": "fist",
+      "target_label": "high",
+      "motion_condition": "forearm_rotation"
+    },
+    {
+      "index": 55,
+      "trial_id": "t055",
+      "object_id": "obj04",
+      "posture_id": "grasp",
+      "target_label": "low",
+      "motion_condition": "wrist_flex_ext"
+    },
+    {
+      "index": 56,
+      "trial_id": "t056",
+      "object_id": "obj04",
+      "posture_id": "grasp",
+      "target_label": "high",
+      "motion_condition": "forearm_rotation"
+    },
+    {
+      "index": 57,
+      "trial_id": "t057",
+      "object_id": "obj05",
+      "posture_id": "grasp",
+      "target_label": "high",
+      "motion_condition": "wrist_flex_ext"
+    },
+    {
+      "index": 58,
+      "trial_id": "t058",
+      "object_id": "obj02",
+      "posture_id": "grasp",
+      "target_label": "low",
+      "motion_condition": "forearm_rotation"
+    },
+    {
+      "index": 59,
+      "trial_id": "t059",
+      "object_id": "obj05",
+      "posture_id": "grasp",
+      "target_label": "high",
+      "motion_condition": "reach_sweep"
+    },
+    {
+      "index": 60,
+      "trial_id": "t060",
+      "object_id": "obj05",
+      "posture_id": "grasp",
+      "target_label": "low",
+      "motion_condition": "forearm_rotation"
+    },
+    {
+      "index": 61,
+      "trial_id": "t061",
+      "object_id": "obj03",
+      "posture_id": "grasp",
+      "target_label": "low",
+      "motion_condition": "reach_sweep"
+    },
+    {
+      "index": 62,
+      "trial_id": "t062",
+      "object_id": "obj01",
+      "posture_id": "grasp",
+      "target_label": "medium",
+      "motion_condition": "stationary"
+    },
+    {
+      "index": 63,
+      "trial_id": "t063",
+      "object_id": "obj05",
+      "posture_id": "grasp",
+      "target_label": "medium",
+      "motion_condition": "reach_sweep"
+    },
+    {
+      "index": 64,
+      "trial_id": "t064",
+      "object_id": "obj04",
+      "posture_id": "grasp",
+      "target_label": "low",
+      "motion_condition": "reach_sweep"
+    },
+    {
+      "index": 65,
+      "trial_id": "t065",
+      "object_id": "obj02",
+      "posture_id": "grasp",
+      "target_label": "high",
+      "motion_condition": "wrist_flex_ext"
+    },
+    {
+      "index": 66,
+      "trial_id": "t066",
+      "object_id": "obj02",
+      "posture_id": "grasp",
+      "target_label": "high",
+      "motion_condition": "forearm_rotation"
+    },
+    {
+      "index": 67,
+      "trial_id": "t067",
+      "object_id": "empty_hand",
+      "posture_id": "fist",
+      "target_label": "medium",
+      "motion_condition": "stationary"
+    },
+    {
+      "index": 68,
+      "trial_id": "t068",
+      "object_id": "empty_hand",
+      "posture_id": "fist",
+      "target_label": "medium",
+      "motion_condition": "reach_sweep"
+    },
+    {
+      "index": 69,
+      "trial_id": "t069",
+      "object_id": "empty_hand",
+      "posture_id": "fist",
+      "target_label": "high",
+      "motion_condition": "forearm_rotation"
+    },
+    {
+      "index": 70,
+      "trial_id": "t070",
+      "object_id": "obj02",
+      "posture_id": "grasp",
+      "target_label": "high",
+      "motion_condition": "stationary"
+    },
+    {
+      "index": 71,
+      "trial_id": "t071",
+      "object_id": "obj02",
+      "posture_id": "grasp",
+      "target_label": "low",
+      "motion_condition": "wrist_flex_ext"
+    },
+    {
+      "index": 72,
+      "trial_id": "t072",
+      "object_id": "empty_hand",
+      "posture_id": "fist",
+      "target_label": "medium",
+      "motion_condition": "stationary"
+    },
+    {
+      "index": 73,
+      "trial_id": "t073",
+      "object_id": "obj03",
+      "posture_id": "grasp",
+      "target_label": "medium",
+      "motion_condition": "stationary"
+    },
+    {
+      "index": 74,
+      "trial_id": "t074",
+      "object_id": "empty_hand",
+      "posture_id": "fist",
+      "target_label": "low",
+      "motion_condition": "wrist_flex_ext"
+    },
+    {
+      "index": 75,
+      "trial_id": "t075",
+      "object_id": "obj01",
+      "posture_id": "grasp",
+      "target_label": "medium",
+      "motion_condition": "forearm_rotation"
+    },
+    {
+      "index": 76,
+      "trial_id": "t076",
+      "object_id": "obj03",
+      "posture_id": "grasp",
+      "target_label": "low",
+      "motion_condition": "reach_sweep"
+    },
+    {
+      "index": 77,
+      "trial_id": "t077",
+      "object_id": "empty_hand",
+      "posture_id": "fist",
+      "target_label": "high",
+      "motion_condition": "reach_sweep"
+    },
+    {
+      "index": 78,
+      "trial_id": "t078",
+      "object_id": "empty_hand",
+      "posture_id": "fist",
+      "target_label": "low",
+      "motion_condition": "stationary"
+    },
+    {
+      "index": 79,
+      "trial_id": "t079",
+      "object_id": "obj05",
+      "posture_id": "grasp",
+      "target_label": "low",
+      "motion_condition": "forearm_rotation"
+    },
+    {
+      "index": 80,
+      "trial_id": "t080",
+      "object_id": "empty_hand",
+      "posture_id": "fist",
+      "target_label": "medium",
+      "motion_condition": "wrist_flex_ext"
+    },
+    {
+      "index": 81,
+      "trial_id": "t081",
+      "object_id": "obj04",
+      "posture_id": "grasp",
+      "target_label": "high",
+      "motion_condition": "reach_sweep"
+    },
+    {
+      "index": 82,
+      "trial_id": "t082",
+      "object_id": "obj02",
+      "posture_id": "grasp",
+      "target_label": "low",
+      "motion_condition": "wrist_flex_ext"
+    },
+    {
+      "index": 83,
+      "trial_id": "t083",
+      "object_id": "obj04",
+      "posture_id": "grasp",
+      "target_label": "medium",
+      "motion_condition": "forearm_rotation"
+    },
+    {
+      "index": 84,
+      "trial_id": "t084",
+      "object_id": "obj05",
+      "posture_id": "grasp",
+      "target_label": "high",
+      "motion_condition": "reach_sweep"
+    },
+    {
+      "index": 85,
+      "trial_id": "t085",
+      "object_id": "obj03",
+      "posture_id": "grasp",
+      "target_label": "medium",
+      "motion_condition": "forearm_rotation"
+    },
+    {
+      "index": 86,
+      "trial_id": "t086",
+      "object_id": "empty_hand",
+      "posture_id": "fist",
+      "target_label": "medium",
+      "motion_condition": "wrist_flex_ext"
+    },
+    {
+      "index": 87,
+      "trial_id": "t087",
+      "object_id": "obj01",
+      "posture_id": "grasp",
+      "target_label": "high",
+      "motion_condition": "wrist_flex_ext"
+    },
+    {
+      "index": 88,
+      "trial_id": "t088",
+      "object_id": "obj05",
+      "posture_id": "grasp",
+      "target_label": "medium",
+      "motion_condition": "wrist_flex_ext"
+    },
+    {
+      "index": 89,
+      "trial_id": "t089",
+      "object_id": "obj05",
+      "posture_id": "grasp",
+      "target_label": "low",
+      "motion_condition": "wrist_flex_ext"
+    },
+    {
+      "index": 90,
+      "trial_id": "t090",
+      "object_id": "obj01",
+      "posture_id": "grasp",
+      "target_label": "high",
+      "motion_condition": "forearm_rotation"
+    },
+    {
+      "index": 91,
+      "trial_id": "t091",
+      "object_id": "obj03",
+      "posture_id": "grasp",
+      "target_label": "high",
+      "motion_condition": "wrist_flex_ext"
+    },
+    {
+      "index": 92,
+      "trial_id": "t092",
+      "object_id": "obj04",
+      "posture_id": "grasp",
+      "target_label": "low",
+      "motion_condition": "forearm_rotation"
+    },
+    {
+      "index": 93,
+      "trial_id": "t093",
+      "object_id": "empty_hand",
+      "posture_id": "fist",
+      "target_label": "high",
+      "motion_condition": "reach_sweep"
+    },
+    {
+      "index": 94,
+      "trial_id": "t094",
+      "object_id": "obj02",
+      "posture_id": "grasp",
+      "target_label": "medium",
+      "motion_condition": "wrist_flex_ext"
+    },
+    {
+      "index": 95,
+      "trial_id": "t095",
+      "object_id": "empty_hand",
+      "posture_id": "fist",
+      "target_label": "high",
+      "motion_condition": "wrist_flex_ext"
+    },
+    {
+      "index": 96,
+      "trial_id": "t096",
+      "object_id": "obj02",
+      "posture_id": "grasp",
+      "target_label": "high",
+      "motion_condition": "forearm_rotation"
+    },
+    {
+      "index": 97,
+      "trial_id": "t097",
+      "object_id": "obj03",
+      "posture_id": "grasp",
+      "target_label": "medium",
+      "motion_condition": "wrist_flex_ext"
+    },
+    {
+      "index": 98,
+      "trial_id": "t098",
+      "object_id": "empty_hand",
+      "posture_id": "fist",
+      "target_label": "low",
+      "motion_condition": "wrist_flex_ext"
+    },
+    {
+      "index": 99,
+      "trial_id": "t099",
+      "object_id": "obj05",
+      "posture_id": "grasp",
+      "target_label": "high",
+      "motion_condition": "stationary"
+    },
+    {
+      "index": 100,
+      "trial_id": "t100",
+      "object_id": "obj02",
+      "posture_id": "grasp",
+      "target_label": "medium",
+      "motion_condition": "reach_sweep"
+    },
+    {
+      "index": 101,
+      "trial_id": "t101",
+      "object_id": "obj01",
+      "posture_id": "grasp",
+      "target_label": "high",
+      "motion_condition": "reach_sweep"
+    },
+    {
+      "index": 102,
+      "trial_id": "t102",
+      "object_id": "empty_hand",
+      "posture_id": "fist",
+      "target_label": "high",
+      "motion_condition": "stationary"
+    },
+    {
+      "index": 103,
+      "trial_id": "t103",
+      "object_id": "obj02",
+      "posture_id": "grasp",
+      "target_label": "low",
+      "motion_condition": "stationary"
+    },
+    {
+      "index": 104,
+      "trial_id": "t104",
+      "object_id": "obj04",
+      "posture_id": "grasp",
+      "target_label": "medium",
+      "motion_condition": "reach_sweep"
+    },
+    {
+      "index": 105,
+      "trial_id": "t105",
+      "object_id": "obj05",
+      "posture_id": "grasp",
+      "target_label": "medium",
+      "motion_condition": "stationary"
+    },
+    {
+      "index": 106,
+      "trial_id": "t106",
+      "object_id": "obj04",
+      "posture_id": "grasp",
+      "target_label": "high",
+      "motion_condition": "reach_sweep"
+    },
+    {
+      "index": 107,
+      "trial_id": "t107",
+      "object_id": "obj04",
+      "posture_id": "grasp",
+      "target_label": "high",
+      "motion_condition": "reach_sweep"
+    },
+    {
+      "index": 108,
+      "trial_id": "t108",
+      "object_id": "obj04",
+      "posture_id": "grasp",
+      "target_label": "low",
+      "motion_condition": "stationary"
+    },
+    {
+      "index": 109,
+      "trial_id": "t109",
+      "object_id": "obj02",
+      "posture_id": "grasp",
+      "target_label": "medium",
+      "motion_condition": "forearm_rotation"
+    },
+    {
+      "index": 110,
+      "trial_id": "t110",
+      "object_id": "obj03",
+      "posture_id": "grasp",
+      "target_label": "low",
+      "motion_condition": "stationary"
+    },
+    {
+      "index": 111,
+      "trial_id": "t111",
+      "object_id": "empty_hand",
+      "posture_id": "fist",
+      "target_label": "medium",
+      "motion_condition": "stationary"
+    },
+    {
+      "index": 112,
+      "trial_id": "t112",
+      "object_id": "obj03",
+      "posture_id": "grasp",
+      "target_label": "high",
+      "motion_condition": "reach_sweep"
+    },
+    {
+      "index": 113,
+      "trial_id": "t113",
+      "object_id": "obj04",
+      "posture_id": "grasp",
+      "target_label": "medium",
+      "motion_condition": "stationary"
+    },
+    {
+      "index": 114,
+      "trial_id": "t114",
+      "object_id": "obj04",
+      "posture_id": "grasp",
+      "target_label": "low",
+      "motion_condition": "forearm_rotation"
+    },
+    {
+      "index": 115,
+      "trial_id": "t115",
+      "object_id": "obj05",
+      "posture_id": "grasp",
+      "target_label": "low",
+      "motion_condition": "reach_sweep"
+    },
+    {
+      "index": 116,
+      "trial_id": "t116",
+      "object_id": "obj03",
+      "posture_id": "grasp",
+      "target_label": "medium",
+      "motion_condition": "forearm_rotation"
+    },
+    {
+      "index": 117,
+      "trial_id": "t117",
+      "object_id": "obj04",
+      "posture_id": "grasp",
+      "target_label": "high",
+      "motion_condition": "wrist_flex_ext"
+    },
+    {
+      "index": 118,
+      "trial_id": "t118",
+      "object_id": "obj05",
+      "posture_id": "grasp",
+      "target_label": "medium",
+      "motion_condition": "forearm_rotation"
+    },
+    {
+      "index": 119,
+      "trial_id": "t119",
+      "object_id": "obj05",
+      "posture_id": "grasp",
+      "target_label": "low",
+      "motion_condition": "wrist_flex_ext"
+    },
+    {
+      "index": 120,
+      "trial_id": "t120",
+      "object_id": "obj04",
+      "posture_id": "grasp",
+      "target_label": "high",
+      "motion_condition": "wrist_flex_ext"
+    },
+    {
+      "index": 121,
+      "trial_id": "t121",
+      "object_id": "obj02",
+      "posture_id": "grasp",
+      "target_label": "low",
+      "motion_condition": "forearm_rotation"
+    },
+    {
+      "index": 122,
+      "trial_id": "t122",
+      "object_id": "obj03",
+      "posture_id": "grasp",
+      "target_label": "medium",
+      "motion_condition": "stationary"
+    },
+    {
+      "index": 123,
+      "trial_id": "t123",
+      "object_id": "obj01",
+      "posture_id": "grasp",
+      "target_label": "medium",
+      "motion_condition": "forearm_rotation"
+    },
+    {
+      "index": 124,
+      "trial_id": "t124",
+      "object_id": "obj01",
+      "posture_id": "grasp",
+      "target_label": "low",
+      "motion_condition": "wrist_flex_ext"
+    },
+    {
+      "index": 125,
+      "trial_id": "t125",
+      "object_id": "obj05",
+      "posture_id": "grasp",
+      "target_label": "medium",
+      "motion_condition": "stationary"
+    },
+    {
+      "index": 126,
+      "trial_id": "t126",
+      "object_id": "obj02",
+      "posture_id": "grasp",
+      "target_label": "medium",
+      "motion_condition": "forearm_rotation"
+    },
+    {
+      "index": 127,
+      "trial_id": "t127",
+      "object_id": "obj01",
+      "posture_id": "grasp",
+      "target_label": "high",
+      "motion_condition": "wrist_flex_ext"
+    },
+    {
+      "index": 128,
+      "trial_id": "t128",
+      "object_id": "obj05",
+      "posture_id": "grasp",
+      "target_label": "low",
+      "motion_condition": "wrist_flex_ext"
+    },
+    {
+      "index": 129,
+      "trial_id": "t129",
+      "object_id": "obj05",
+      "posture_id": "grasp",
+      "target_label": "medium",
+      "motion_condition": "forearm_rotation"
+    },
+    {
+      "index": 130,
+      "trial_id": "t130",
+      "object_id": "empty_hand",
+      "posture_id": "fist",
+      "target_label": "low",
+      "motion_condition": "forearm_rotation"
+    },
+    {
+      "index": 131,
+      "trial_id": "t131",
+      "object_id": "empty_hand",
+      "posture_id": "fist",
+      "target_label": "medium",
+      "motion_condition": "wrist_flex_ext"
+    },
+    {
+      "index": 132,
+      "trial_id": "t132",
+      "object_id": "obj01",
+      "posture_id": "grasp",
+      "target_label": "low",
+      "motion_condition": "wrist_flex_ext"
+    },
+    {
+      "index": 133,
+      "trial_id": "t133",
+      "object_id": "empty_hand",
+      "posture_id": "fist",
+      "target_label": "high",
+      "motion_condition": "forearm_rotation"
+    },
+    {
+      "index": 134,
+      "trial_id": "t134",
+      "object_id": "obj01",
+      "posture_id": "grasp",
+      "target_label": "medium",
+      "motion_condition": "reach_sweep"
+    },
+    {
+      "index": 135,
+      "trial_id": "t135",
+      "object_id": "obj04",
+      "posture_id": "grasp",
+      "target_label": "medium",
+      "motion_condition": "reach_sweep"
+    },
+    {
+      "index": 136,
+      "trial_id": "t136",
+      "object_id": "obj05",
+      "posture_id": "grasp",
+      "target_label": "low",
+      "motion_condition": "stationary"
+    },
+    {
+      "index": 137,
+      "trial_id": "t137",
+      "object_id": "obj05",
+      "posture_id": "grasp",
+      "target_label": "high",
+      "motion_condition": "wrist_flex_ext"
+    },
+    {
+      "index": 138,
+      "trial_id": "t138",
+      "object_id": "obj02",
+      "posture_id": "grasp",
+      "target_label": "high",
+      "motion_condition": "wrist_flex_ext"
+    },
+    {
+      "index": 139,
+      "trial_id": "t139",
+      "object_id": "obj01",
+      "posture_id": "grasp",
+      "target_label": "low",
+      "motion_condition": "forearm_rotation"
+    },
+    {
+      "index": 140,
+      "trial_id": "t140",
+      "object_id": "obj03",
+      "posture_id": "grasp",
+      "target_label": "high",
+      "motion_condition": "stationary"
+    },
+    {
+      "index": 141,
+      "trial_id": "t141",
+      "object_id": "obj04",
+      "posture_id": "grasp",
+      "target_label": "low",
+      "motion_condition": "forearm_rotation"
+    },
+    {
+      "index": 142,
+      "trial_id": "t142",
+      "object_id": "obj02",
+      "posture_id": "grasp",
+      "target_label": "low",
+      "motion_condition": "reach_sweep"
+    },
+    {
+      "index": 143,
+      "trial_id": "t143",
+      "object_id": "obj02",
+      "posture_id": "grasp",
+      "target_label": "medium",
+      "motion_condition": "stationary"
+    },
+    {
+      "index": 144,
+      "trial_id": "t144",
+      "object_id": "obj04",
+      "posture_id": "grasp",
+      "target_label": "high",
+      "motion_condition": "wrist_flex_ext"
+    },
+    {
+      "index": 145,
+      "trial_id": "t145",
+      "object_id": "obj03",
+      "posture_id": "grasp",
+      "target_label": "high",
+      "motion_condition": "wrist_flex_ext"
+    },
+    {
+      "index": 146,
+      "trial_id": "t146",
+      "object_id": "obj05",
+      "posture_id": "grasp",
+      "target_label": "medium",
+      "motion_condition": "wrist_flex_ext"
+    },
+    {
+      "index": 147,
+      "trial_id": "t147",
+      "object_id": "obj01",
+      "posture_id": "grasp",
+      "target_label": "medium",
+      "motion_condition": "wrist_flex_ext"
+    },
+    {
+      "index": 148,
+      "trial_id": "t148",
+      "object_id": "obj05",
+      "posture_id": "grasp",
+      "target_label": "high",
+      "motion_condition": "forearm_rotation"
+    },
+    {
+      "index": 149,
+      "trial_id": "t149",
+      "object_id": "obj01",
+      "posture_id": "grasp",
+      "target_label": "high",
+      "motion_condition": "stationary"
+    },
+    {
+      "index": 150,
+      "trial_id": "t150",
+      "object_id": "obj01",
+      "posture_id": "grasp",
+      "target_label": "low",
+      "motion_condition": "stationary"
+    },
+    {
+      "index": 151,
+      "trial_id": "t151",
+      "object_id": "obj02",
+      "posture_id": "grasp",
+      "target_label": "medium",
+      "motion_condition": "wrist_flex_ext"
+    },
+    {
+      "index": 152,
+      "trial_id": "t152",
+      "object_id": "obj04",
+      "posture_id": "grasp",
+      "target_label": "medium",
+      "motion_condition": "wrist_flex_ext"
+    },
+    {
+      "index": 153,
+      "trial_id": "t153",
+      "object_id": "obj04",
+      "posture_id": "grasp",
+      "target_label": "high",
+      "motion_condition": "stationary"
+    },
+    {
+      "index": 154,
+      "trial_id": "t154",
+      "object_id": "obj05",
+      "posture_id": "grasp",
+      "target_label": "low",
+      "motion_condition": "reach_sweep"
+    },
+    {
+      "index": 155,
+      "trial_id": "t155",
+      "object_id": "obj04",
+      "posture_id": "grasp",
+      "target_label": "medium",
+      "motion_condition": "stationary"
+    },
+    {
+      "index": 156,
+      "trial_id": "t156",
+      "object_id": "empty_hand",
+      "posture_id": "fist",
+      "target_label": "low",
+      "motion_condition": "forearm_rotation"
+    },
+    {
+      "index": 157,
+      "trial_id": "t157",
+      "object_id": "empty_hand",
+      "posture_id": "fist",
+      "target_label": "low",
+      "motion_condition": "reach_sweep"
+    },
+    {
+      "index": 158,
+      "trial_id": "t158",
+      "object_id": "obj02",
+      "posture_id": "grasp",
+      "target_label": "medium",
+      "motion_condition": "wrist_flex_ext"
+    },
+    {
+      "index": 159,
+      "trial_id": "t159",
+      "object_id": "obj05",
+      "posture_id": "grasp",
+      "target_label": "high",
+      "motion_condition": "stationary"
+    },
+    {
+      "index": 160,
+      "trial_id": "t160",
+      "object_id": "obj01",
+      "posture_id": "grasp",
+      "target_label": "medium",
+      "motion_condition": "reach_sweep"
+    },
+    {
+      "index": 161,
+      "trial_id": "t161",
+      "object_id": "obj03",
+      "posture_id": "grasp",
+      "target_label": "medium",
+      "motion_condition": "reach_sweep"
+    },
+    {
+      "index": 162,
+      "trial_id": "t162",
+      "object_id": "empty_hand",
+      "posture_id": "fist",
+      "target_label": "low",
+      "motion_condition": "reach_sweep"
+    },
+    {
+      "index": 163,
+      "trial_id": "t163",
+      "object_id": "obj04",
+      "posture_id": "grasp",
+      "target_label": "low",
+      "motion_condition": "wrist_flex_ext"
+    },
+    {
+      "index": 164,
+      "trial_id": "t164",
+      "object_id": "obj04",
+      "posture_id": "grasp",
+      "target_label": "high",
+      "motion_condition": "stationary"
+    },
+    {
+      "index": 165,
+      "trial_id": "t165",
+      "object_id": "obj02",
+      "posture_id": "grasp",
+      "target_label": "medium",
+      "motion_condition": "forearm_rotation"
+    },
+    {
+      "index": 166,
+      "trial_id": "t166",
+      "object_id": "obj01",
+      "posture_id": "grasp",
+      "target_label": "high",
+      "motion_condition": "stationary"
+    },
+    {
+      "index": 167,
+      "trial_id": "t167",
+      "object_id": "obj01",
+      "posture_id": "grasp",
+      "target_label": "high",
+      "motion_condition": "reach_sweep"
+    },
+    {
+      "index": 168,
+      "trial_id": "t168",
+      "object_id": "obj03",
+      "posture_id": "grasp",
+      "target_label": "low",
+      "motion_condition": "stationary"
+    },
+    {
+      "index": 169,
+      "trial_id": "t169",
+      "object_id": "obj03",
+      "posture_id": "grasp",
+      "target_label": "low",
+      "motion_condition": "wrist_flex_ext"
+    },
+    {
+      "index": 170,
+      "trial_id": "t170",
+      "object_id": "empty_hand",
+      "posture_id": "fist",
+      "target_label": "high",
+      "motion_condition": "wrist_flex_ext"
+    },
+    {
+      "index": 171,
+      "trial_id": "t171",
+      "object_id": "obj02",
+      "posture_id": "grasp",
+      "target_label": "high",
+      "motion_condition": "stationary"
+    },
+    {
+      "index": 172,
+      "trial_id": "t172",
+      "object_id": "obj03",
+      "posture_id": "grasp",
+      "target_label": "medium",
+      "motion_condition": "reach_sweep"
+    },
+    {
+      "index": 173,
+      "trial_id": "t173",
+      "object_id": "empty_hand",
+      "posture_id": "fist",
+      "target_label": "high",
+      "motion_condition": "forearm_rotation"
+    },
+    {
+      "index": 174,
+      "trial_id": "t174",
+      "object_id": "obj01",
+      "posture_id": "grasp",
+      "target_label": "low",
+      "motion_condition": "reach_sweep"
+    },
+    {
+      "index": 175,
+      "trial_id": "t175",
+      "object_id": "obj05",
+      "posture_id": "grasp",
+      "target_label": "medium",
+      "motion_condition": "reach_sweep"
+    },
+    {
+      "index": 176,
+      "trial_id": "t176",
+      "object_id": "empty_hand",
+      "posture_id": "fist",
+      "target_label": "low",
+      "motion_condition": "stationary"
+    },
+    {
+      "index": 177,
+      "trial_id": "t177",
+      "object_id": "obj03",
+      "posture_id": "grasp",
+      "target_label": "medium",
+      "motion_condition": "stationary"
+    },
+    {
+      "index": 178,
+      "trial_id": "t178",
+      "object_id": "empty_hand",
+      "posture_id": "fist",
+      "target_label": "high",
+      "motion_condition": "reach_sweep"
+    },
+    {
+      "index": 179,
+      "trial_id": "t179",
+      "object_id": "obj04",
+      "posture_id": "grasp",
+      "target_label": "medium",
+      "motion_condition": "reach_sweep"
+    },
+    {
+      "index": 180,
+      "trial_id": "t180",
+      "object_id": "empty_hand",
+      "posture_id": "fist",
+      "target_label": "medium",
+      "motion_condition": "forearm_rotation"
+    },
+    {
+      "index": 181,
+      "trial_id": "t181",
+      "object_id": "obj05",
+      "posture_id": "grasp",
+      "target_label": "high",
+      "motion_condition": "forearm_rotation"
+    },
+    {
+      "index": 182,
+      "trial_id": "t182",
+      "object_id": "obj05",
+      "posture_id": "grasp",
+      "target_label": "medium",
+      "motion_condition": "stationary"
+    },
+    {
+      "index": 183,
+      "trial_id": "t183",
+      "object_id": "obj05",
+      "posture_id": "grasp",
+      "target_label": "high",
+      "motion_condition": "stationary"
+    },
+    {
+      "index": 184,
+      "trial_id": "t184",
+      "object_id": "obj04",
+      "posture_id": "grasp",
+      "target_label": "high",
+      "motion_condition": "forearm_rotation"
+    },
+    {
+      "index": 185,
+      "trial_id": "t185",
+      "object_id": "obj01",
+      "posture_id": "grasp",
+      "target_label": "low",
+      "motion_condition": "reach_sweep"
+    },
+    {
+      "index": 186,
+      "trial_id": "t186",
+      "object_id": "obj03",
+      "posture_id": "grasp",
+      "target_label": "medium",
+      "motion_condition": "reach_sweep"
+    },
+    {
+      "index": 187,
+      "trial_id": "t187",
+      "object_id": "obj04",
+      "posture_id": "grasp",
+      "target_label": "low",
+      "motion_condition": "stationary"
+    },
+    {
+      "index": 188,
+      "trial_id": "t188",
+      "object_id": "obj04",
+      "posture_id": "grasp",
+      "target_label": "medium",
+      "motion_condition": "forearm_rotation"
+    },
+    {
+      "index": 189,
+      "trial_id": "t189",
+      "object_id": "obj04",
+      "posture_id": "grasp",
+      "target_label": "low",
+      "motion_condition": "stationary"
+    },
+    {
+      "index": 190,
+      "trial_id": "t190",
+      "object_id": "obj01",
+      "posture_id": "grasp",
+      "target_label": "medium",
+      "motion_condition": "forearm_rotation"
+    },
+    {
+      "index": 191,
+      "trial_id": "t191",
+      "object_id": "obj02",
+      "posture_id": "grasp",
+      "target_label": "high",
+      "motion_condition": "reach_sweep"
+    },
+    {
+      "index": 192,
+      "trial_id": "t192",
+      "object_id": "obj03",
+      "posture_id": "grasp",
+      "target_label": "low",
+      "motion_condition": "stationary"
+    },
+    {
+      "index": 193,
+      "trial_id": "t193",
+      "object_id": "obj05",
+      "posture_id": "grasp",
+      "target_label": "low",
+      "motion_condition": "stationary"
+    },
+    {
+      "index": 194,
+      "trial_id": "t194",
+      "object_id": "obj02",
+      "posture_id": "grasp",
+      "target_label": "high",
+      "motion_condition": "reach_sweep"
+    },
+    {
+      "index": 195,
+      "trial_id": "t195",
+      "object_id": "obj01",
+      "posture_id": "grasp",
+      "target_label": "low",
+      "motion_condition": "stationary"
+    },
+    {
+      "index": 196,
+      "trial_id": "t196",
+      "object_id": "obj05",
+      "posture_id": "grasp",
+      "target_label": "high",
+      "motion_condition": "reach_sweep"
+    },
+    {
+      "index": 197,
+      "trial_id": "t197",
+      "object_id": "obj02",
+      "posture_id": "grasp",
+      "target_label": "high",
+      "motion_condition": "stationary"
+    },
+    {
+      "index": 198,
+      "trial_id": "t198",
+      "object_id": "obj02",
+      "posture_id": "grasp",
+      "target_label": "medium",
+      "motion_condition": "reach_sweep"
+    },
+    {
+      "index": 199,
+      "trial_id": "t199",
+      "object_id": "obj03",
+      "posture_id": "grasp",
+      "target_label": "high",
+      "motion_condition": "forearm_rotation"
+    },
+    {
+      "index": 200,
+      "trial_id": "t200",
+      "object_id": "obj04",
+      "posture_id": "grasp",
+      "target_label": "low",
+      "motion_condition": "reach_sweep"
+    }
+  ]
+}
