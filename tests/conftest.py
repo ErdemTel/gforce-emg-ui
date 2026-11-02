@@ -9,6 +9,14 @@ import pytest
 from gforce_emg_ui.hub import EmgBlock, ImuBlock
 
 
+@pytest.fixture(autouse=True)
+def _isolated_qsettings(tmp_path_factory):
+    """Each test gets empty QSettings: the user's real settings are never read or written."""
+    from PyQt5 import QtCore
+    QtCore.QSettings.setPath(QtCore.QSettings.IniFormat, QtCore.QSettings.UserScope,
+                             str(tmp_path_factory.mktemp("qsettings")))
+
+
 @pytest.fixture(scope="session")
 def qapp():
     from PyQt5 import QtWidgets

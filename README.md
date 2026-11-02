@@ -339,13 +339,83 @@ warm-up → comfortable low / medium / high effort → *Stop*.
 
 - Windows and hop come from the model (sample counts, e.g. 100 / 25); features and
   probabilities come from the classifier's own `predict_windows`. Raw output: no smoothing,
-  voting, rest gate or thresholds.
+  voting, rest gate or thresholds. Optional output stabilization (below) only changes the
+  large displayed value; the raw output stays visible and logged.
 - Lost/invalid/non-finite samples, index gaps, segment or stream changes, dropped input and
   stale input (> 0.5 s, to verify on the band) reset the window; a reconnect resets it,
   a disconnect or a filter/rate change stops it.
-- *Log predictions* writes `predictions.csv`, `events.csv`, `display.csv` and `run.json` to a
-  new folder under `live_logs/` (git-ignored). No labels are recorded.
+- *Log predictions* writes `predictions.csv`, `stabilization.csv`, `events.csv`,
+  `display.csv` and `run.json` to a new folder under `live_logs/` (git-ignored). No labels
+  are recorded.
 - Timings shown are host-side only (not sensor-to-display latency).
+
+### Output stabilization
+
+Display/output processing after the frozen classifier, to keep brief class excursions
+(e.g. LOW → MEDIUM → LOW while curling the fingers) from changing the shown command. Not
+measured stiffness, not a validated robot safety controller. OFF by default.
+
+Enable: *Output stabilization* → tick *Enable stabilization* → *Apply settings*. Edits
+are a draft ("Unapplied changes") until *Apply settings*; they can be changed while
+classifying. Apply sets a new settings revision, clears the stabilizer, and uses only
+predictions received afterwards (no replay); the model, buffer and recording continue.
+Applied settings persist per user (Linux: `~/.config/gforce-emg-ui/live-classifier.ini`).
+*Restore defaults* fills the controls (Enable kept); *Reset state* clears the stabilizer
+only. Raw behavior again: untick *Enable stabilization* → *Apply settings*.
+
+Algorithm (`live/stabilization.py`, persistence confirmation v1): a raw winner different
+from the shown class becomes a candidate. It is accepted when that same candidate has won
+every processed prediction, without a break, for the confirmation time: upward or
+downward by s (0 < 0.5 < 1), or *startup* while no class is accepted (after Start, any
+reset, a settings change, invalid input or an expired hold; `s = --` until then, never
+LOW by default). LOW ↔ HIGH may change directly; nothing skips confirmation; 0 ms =
+accept on the first prediction. A different candidate, a return to the shown class, a
+failed probability gate, a skipped/expired window, a window-index jump or a receipt gap
+> *max evidence gap* restarts the candidate from zero (bursts are never added up).
+
+Time = host receipt time of each window's newest sample (`newest_receipt_mono`):
+host-observed persistence, not acquisition time or physiological latency. Predictions
+with the same receipt time add 0 ms; slow inference or GUI refresh adds nothing; only a
+new prediction can accept a class. With the dongle's ~150 ms bursts, 100 ms in practice
+means "still the winner in the next burst". The confirmation adds to window, transport
+and inference delay.
+
+| setting | default | range |
+|---|---|---|
+| Upward / downward / startup confirmation | 100 ms | 0–1000 ms |
+| Probability gate (advanced) | off | – |
+| Min. candidate probability | 0.60 | 0–1 |
+| Min. probability margin (vs. the shown class) | 0.10 | 0–1 |
+| Max. evidence gap | 250 ms | 1 ms – stale limit (500 ms) |
+| Max. unsupported hold | 1000 ms | 100–10000 ms, ≥ longer confirmation + gap |
+
+Defaults are initial engineering values, not validated optima. Probabilities are
+classifier scores, not calibrated certainty. The gate applies to candidates only; the
+shown class is "supported" by any prediction whose raw winner it is. If predictions keep
+arriving but none supports the shown class for longer than the hold, the output becomes
+unavailable ("unsupported hold expired"; separate from stale input). Invalid predictions,
+stale input or predictions, buffer resets, stream/segment changes, Stop, disconnect,
+model change and errors clear the stabilizer: `s = --`, never a fallback s = 0.
+
+Display: large value = *Stabilized command* (ON) or *Raw output — stabilization OFF*;
+the raw class, the RAW probability bars and a status line ("Holding LOW; MEDIUM pending:
+50 / 100 ms") stay visible. History: raw s (dotted), stabilized s (thick), raw soft score
+(dashed), each can be hidden; gaps are kept; grey lines mark resets and settings changes.
+
+Logs (with *Log predictions*): `predictions.csv` unchanged (raw).
+`stabilization.csv`: one `observe` row per processed prediction (join on `run_id` +
+`pred_id`; raw class, probabilities, revision, accepted class/s or empty, `output_valid`,
+pending class and evidence ms, last support, `accepted_pred_id` of the prediction that
+established the shown class, evidence and decision times, transition, reason) plus
+`settings`, `reset`, `break` and `ignored` rows. `events.csv`: `stabilization_settings`
+(revision + settings JSON), `stabilization_reset`. `run.json`: initial settings,
+algorithm version, end counters (raw class changes, accepted changes, cancelled
+candidates, gate failures, hold expiries). No ground truth: rejected transitions are not
+"corrected errors".
+
+Limits: brief intentional commands are delayed or rejected too; sustained
+misclassification is not repaired; synthetic tests and the simulator say nothing about
+real human EMG.
 
 Disable: `.venv/bin/pip uninstall emg-classifier` (the tab then says so; recording is
 unaffected). Remove: delete `src/gforce_emg_ui/live/`, `ui/live_view.py`,
@@ -392,6 +462,7 @@ and counted. Features live in `features.py` (`ac_rms` excludes invalid samples).
 .venv/bin/python -m pytest tests/test_collection_open_hand.py   # open hand, both extensions
 .venv/bin/python -m gforce_emg_ui.bench        # host-only benchmark (add --quick, --json out.json)
 .venv/bin/python -m pytest tests/test_live_*.py           # live classifier
+.venv/bin/python -m pytest tests/test_live_stabilization.py -s   # + replay demo counts
 .venv/bin/python -m gforce_emg_ui.live.bench --model PATH # live classifier, simulated bursts
 ```
 

@@ -2,8 +2,10 @@
 
   run.json         model / configuration hashes, versions, source, compatibility,
                    settings; rewritten at the end with counters and timings
-  predictions.csv  one row per classified window (published or expired)
-  events.csv       start / stop / reset / stale events
+  predictions.csv  one row per classified window (published or expired): RAW output
+  stabilization.csv  output stabilizer: one row per processed raw prediction (joins
+                   predictions.csv on run_id + pred_id) plus settings / reset / break rows
+  events.csv       start / stop / reset / stale / stabilization settings events
   display.csv      GUI-applied times, keyed by pred_id (not every result is shown)
 
 All file work runs on one writer thread behind a bounded queue: put_*() never
@@ -21,9 +23,11 @@ from typing import Optional
 
 from ..collection.storage import atomic_write_text, dumps
 from .engine import DISPLAY_FIELDS, EVENT_FIELDS, PREDICTION_FIELDS
+from .stabilization import STABILIZATION_FIELDS
 
 RAW_MARKERS = ("trial.json", "session.json", "emg.csv")
-FILES = {"predictions": PREDICTION_FIELDS, "events": EVENT_FIELDS, "display": DISPLAY_FIELDS}
+FILES = {"predictions": PREDICTION_FIELDS, "events": EVENT_FIELDS, "display": DISPLAY_FIELDS,
+         "stabilization": STABILIZATION_FIELDS}
 
 
 class LogRootError(ValueError):
@@ -84,6 +88,9 @@ class PredictionLog:
 
     def put_display(self, row: dict):
         self._put("display", row)
+
+    def put_stabilization(self, row: dict):
+        self._put("stabilization", row)
 
     def close(self, final: Optional[dict] = None):
         """Idempotent, non-blocking: the writer drains the queue, then finishes run.json."""

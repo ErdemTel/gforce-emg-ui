@@ -1,19 +1,23 @@
 """Live Classifier tab: the frozen model's live prediction s = 0 / 0.5 / 1, or s = --.
 
-Display-only. A thin Qt layer over live.engine.LiveEngine: inference and the freshness
-watchdog run on their own threads whether or not this tab is visible; refresh() (GUI
-thread, only while visible) reads the latest-result snapshot and redraws what changed.
+Display-only. A thin Qt layer over live.engine.LiveEngine: inference, output
+stabilization and the freshness watchdog run on their own threads whether or not this
+tab is visible; refresh() (GUI thread, only while visible) reads the latest-result
+snapshot and redraws what changed. The large value is the raw output, or the
+stabilized command when stabilization is ON; raw output and probabilities stay visible.
+Stabilization edits are a draft until Apply; applied settings persist (QSettings).
 The model is loaded only on request, after a trust confirmation, on a background thread.
 """
 
 import collections
+import json
 import threading
 import time
 import uuid
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple
 
 import numpy as np
 import pyqtgraph as pg
@@ -26,6 +30,9 @@ from ..live.engine import (ERROR, INVALID_INPUT, NO_MODEL, READY, RUNNING, STALE
                            WARMING_UP, LiveEngine, LiveSettings)
 from ..live.log import LogRootError, PredictionLog, check_root
 from ..live.model import TRUST_NOTE, ModelError, classifier_status, load_trusted_model
+from ..live.stabilization import (CONFIRMING, GATE_NOT_MET, HOLDING, OFF, PENDING,
+                                  SETTINGS_SCHEMA, UNSUPPORTED, WAITING, StabilizerSettings,
+                                  describe)
 from ..sources import DISCONNECTING, FAILED, IDLE, RECONNECTING, STREAMING
 from .collection_panel import LiveText
 
@@ -39,7 +46,74 @@ STATE_COLORS = {RUNNING: "#2e7d32", WARMING_UP: "#1565c0", STALE: "#ef6c00",
 LEVEL_TAGS = {compat.OK: ("#2e7d32", "ok"), compat.WARN: ("#ef6c00", "warn"),
               compat.UNKNOWN: ("#ef6c00", "unknown"), compat.BLOCK: ("#c62828", "BLOCK")}
 BAR_COLORS = ("#86b6ef", "#2a78d6", "#104281")   # ordinal blue ramp: low -> high
-S_COLOR, SOFT_COLOR = "#2a78d6", "#eb6834"
+S_COLOR, SOFT_COLOR, STAB_COLOR, MARK_COLOR = "#2a78d6", "#eb6834", "#1b1b1b", "#9e9e9e"
+STAB_COLORS = {OFF: "#757575", WAITING: "#757575", CONFIRMING: "#1565c0", PENDING: "#1565c0",
+               HOLDING: "#2e7d32", GATE_NOT_MET: "#ef6c00", UNSUPPORTED: "#c62828"}
+STORE_KEY, SCHEMA_KEY = "live_stabilization/settings", "live_stabilization/schema"
+TIP_CONFIRM = ("How long a {d} class must win every processed prediction, without a break, "
+               "before it replaces the shown class. Measured on host receipt times of the "
+               "windows (not acquisition time). Longer suppresses short excursions but delays "
+               "real changes; it adds to window, transport and inference delay. Brief "
+               "intentional commands may also be rejected. Filtering cannot repair "
+               "sustained misclassification. 0 = accept on the first prediction.")
+TIPS = {
+    "enable": "ON: the large value is the stabilized command (a class change is shown only "
+              "after it persists). OFF: the raw classifier output, unchanged. Takes effect "
+              "on Apply settings.",
+    "startup": "Like the confirmations, while no class is accepted (after Start, any reset, "
+               "a settings change, invalid input or an expired hold): s = -- until confirmed.",
+    "gate": "Also require the candidate's score >= minimum, and >= margin above the shown "
+            "class's score. Scores are classifier outputs, not calibrated certainty. A "
+            "failed gate restarts the candidate. Off by default.",
+    "minp": "Minimum classifier score of the candidate (not a reliability).",
+    "margin": "Candidate score minus the shown class's score (not used while no class is "
+              "accepted).",
+    "gap": "If two consecutive predictions were received farther apart than this, a pending "
+           "change restarts from zero. At most the engine's stale limit.",
+    "hold": "If predictions keep arriving but none supports the shown class for this long, "
+            "and no change can be confirmed, the output becomes unavailable (unsupported "
+            "hold expired; not a stale-input error). Must be >= the longer confirmation + "
+            "maximum evidence gap.",
+    "defaults": "Put the initial engineering values (not validated optima) into the "
+                "controls; the Enable box is kept. Apply settings makes them active.",
+    "reset": "Clear the stabilizer only (s = -- until a class is confirmed again). The raw "
+             "output, the window buffer and any recording are not affected.",
+}
+
+
+def settings_store() -> QtCore.QSettings:
+    """Per-user INI file (Linux: ~/.config/gforce-emg-ui/live-classifier.ini)."""
+    return QtCore.QSettings(QtCore.QSettings.IniFormat, QtCore.QSettings.UserScope,
+                            "gforce-emg-ui", "live-classifier")
+
+
+def load_stabilization(store, stale_ms: float) -> Tuple[Optional[StabilizerSettings], str]:
+    """(applied settings or None, note). Missing -> (None, ""); unusable -> (None, why)."""
+    raw = store.value(STORE_KEY)
+    if raw is None:
+        return None, ""
+    try:
+        schema = int(store.value(SCHEMA_KEY))
+        if schema != SETTINGS_SCHEMA:
+            raise ValueError(f"schema {schema}, expected {SETTINGS_SCHEMA}")
+        return StabilizerSettings.from_dict(json.loads(raw), stale_ms), ""
+    except (TypeError, ValueError) as e:
+        return None, f"Stored stabilization settings ignored ({e}); defaults shown, OFF."
+
+
+def save_stabilization(store, settings: StabilizerSettings):
+    store.setValue(SCHEMA_KEY, SETTINGS_SCHEMA)
+    store.setValue(STORE_KEY, json.dumps(settings.to_dict(), sort_keys=True))
+    store.sync()
+
+
+def _summary(st: StabilizerSettings) -> str:
+    if not st.enabled:
+        return "OFF (raw output shown)"
+    gate = (f"gate p ≥ {st.min_probability:.2f}, margin ≥ {st.min_margin:.2f}" if st.gate
+            else "gate off")
+    return (f"ON · up {st.up_ms} / down {st.down_ms} / startup {st.startup_ms} ms · {gate} · "
+            f"gap ≤ {st.max_gap_ms} ms · hold ≤ {st.max_unsupported_ms} ms")
 
 
 def _set_enabled(w, on: bool):
@@ -113,12 +187,16 @@ class LiveClassifierDashboard(QtWidgets.QWidget):
     model_loaded = QtCore.pyqtSignal(object, int)       # (LoadedModel | ModelError, token)
 
     def __init__(self, hub, source, parent=None, settings: Optional[LiveSettings] = None,
-                 log_root: Optional[Path] = None, clock=time.monotonic):
+                 log_root: Optional[Path] = None, clock=time.monotonic, store=None):
         super().__init__(parent)
         self.hub = hub
         self.source = source
         self._clock = clock
         self.engine = LiveEngine(hub, settings, clock=clock)
+        self.store = store if store is not None else settings_store()
+        stored, self.stab_note = load_stabilization(self.store, self._stale_ms)
+        if stored is not None:
+            self.engine.set_stabilization(stored)
         self.model = None
         self.report: Optional[compat.CompatReport] = None
         self.load_error = ""
@@ -138,6 +216,7 @@ class LiveClassifierDashboard(QtWidgets.QWidget):
         self.start_error = ""
         self.redraw_count = 0
         self._build()
+        self._set_stab_controls(self.engine.stabilizer_settings)
         self.model_loaded.connect(self._on_model_loaded)
         source.connected.connect(self._on_connected)
         source.params.connect(self._on_params)
@@ -196,6 +275,7 @@ class LiveClassifierDashboard(QtWidgets.QWidget):
         self.log_dir_label.setWordWrap(True)
         bl.addWidget(self.log_dir_label)
         lv.addWidget(box)
+        lv.addWidget(self._build_stabilization())
 
         box = QtWidgets.QGroupBox("Compatibility")
         bl = QtWidgets.QVBoxLayout(box)
@@ -215,23 +295,31 @@ class LiveClassifierDashboard(QtWidgets.QWidget):
         self.sim_label.setStyleSheet("background:#fff3e0; color:#b71c1c; padding:4px;")
         self.sim_label.setVisible(bool(getattr(self.source, "is_simulation", False)))
         right.addWidget(self.sim_label)
+        self.mode_label = LiveText(lines=1, px=14, bold=True, pad=4)
         self.s_label = LiveText(lines=1, px=88, bold=True, pad=12)
         self.class_label = LiveText(lines=1, px=28, bold=True, pad=6)
+        self.raw_label = LiveText(lines=1, px=16, pad=6)
         self.state_label = LiveText(lines=1, px=15, bold=True, pad=10)
+        self.stab_label = LiveText(lines=1, px=15, bold=True, pad=10)
         self.bars = ProbBars()
         self.soft_label = LiveText(lines=2, px=13, pad=6)
         head = QtWidgets.QHBoxLayout()
         col = QtWidgets.QVBoxLayout()
-        for w in (self.s_label, self.class_label):
+        for w in (self.mode_label, self.s_label, self.class_label, self.raw_label):
             col.addWidget(w)
         head.addLayout(col, 1)
         col = QtWidgets.QVBoxLayout()
-        for w in (self.bars, self.soft_label):
+        bars_title = LiveText(lines=1, px=13, pad=4)
+        bars_title.setText("<b>RAW</b> model probabilities (scores, not calibrated)")
+        for w in (bars_title, self.bars, self.soft_label):
             col.addWidget(w)
         col.addStretch(1)
         head.addLayout(col, 1)
         right.addLayout(head)
-        right.addWidget(self.state_label)
+        row = QtWidgets.QHBoxLayout()
+        row.addWidget(self.state_label, 1)
+        row.addWidget(self.stab_label, 1)
+        right.addLayout(row)
 
         self.plot = pg.PlotWidget()
         self.plot.setMenuEnabled(False)
@@ -243,18 +331,36 @@ class LiveClassifierDashboard(QtWidgets.QWidget):
         self.plot.getAxis("left").setTicks([[(0, "0 low"), (0.5, "0.5 medium"), (1, "1 high")]])
         self.plot.getAxis("bottom").enableAutoSIPrefix(False)
         self.plot.setLabel("bottom", "host receipt time of the newest window sample (s, 0 = now)")
-        self.plot.setTitle("History (raw model output; gaps = no valid prediction)")
-        self.plot.addLegend(offset=(10, 10))
-        self.s_curve = self.plot.plot(pen=pg.mkPen(S_COLOR, width=2), name="s (argmax class)")
+        self.plot.addLegend(offset=(10, 4), colCount=3)
+        self.stab_curve = self.plot.plot(pen=pg.mkPen(STAB_COLOR, width=4),
+                                         name="stabilized s")
+        self.s_curve = self.plot.plot(pen=pg.mkPen(S_COLOR, width=2, style=QtCore.Qt.DotLine),
+                                      name="raw s (argmax)")
         self.s_dots = pg.ScatterPlotItem(size=5, pen=None, brush=pg.mkBrush(S_COLOR))
         self.plot.addItem(self.s_dots)
         self.soft_curve = self.plot.plot(
             pen=pg.mkPen(SOFT_COLOR, width=2, style=QtCore.Qt.DashLine),
-            name="soft class score (not stiffness)")
+            name="raw soft score (not stiffness)")
+        self.mark_curve = self.plot.plot(pen=pg.mkPen(MARK_COLOR, width=1))
+        row = QtWidgets.QHBoxLayout()
+        row.addWidget(QtWidgets.QLabel("<b>History</b> · show:"))
+        self.show_raw = QtWidgets.QCheckBox("raw s")
+        self.show_stab = QtWidgets.QCheckBox("stabilized s")
+        self.show_soft = QtWidgets.QCheckBox("raw soft score")
+        for box, items in ((self.show_raw, (self.s_curve, self.s_dots)),
+                           (self.show_stab, (self.stab_curve,)),
+                           (self.show_soft, (self.soft_curve,))):
+            box.setChecked(True)
+            box.toggled.connect(lambda on, items=items: [i.setVisible(on) for i in items])
+            row.addWidget(box)
+        row.addStretch(1)
+        row.addWidget(QtWidgets.QLabel("<small>gaps = no output · grey = reset / settings "
+                                       "change · stabilized = raw when OFF</small>"))
+        right.addLayout(row)
         right.addWidget(self.plot, 1)
         box = QtWidgets.QGroupBox("Diagnostics (host-side)")
         bl = QtWidgets.QVBoxLayout(box)
-        self.diag_label = LiveText(lines=11, px=11, pad=6)
+        self.diag_label = LiveText(lines=12, px=11, pad=6)
         bl.addWidget(self.diag_label)
         right.addWidget(box)
         note = QtWidgets.QLabel(NOTE)
@@ -264,7 +370,86 @@ class LiveClassifierDashboard(QtWidgets.QWidget):
         layout = QtWidgets.QHBoxLayout(self)
         layout.addWidget(scroll)
         layout.addLayout(right, 1)
-        self._show_prediction(None, NO_MODEL, "", None)
+        self._show_prediction(None, NO_MODEL, "", None, None)
+
+    def _build_stabilization(self) -> QtWidgets.QGroupBox:
+        box = QtWidgets.QGroupBox("Output stabilization")
+        bl = QtWidgets.QVBoxLayout(box)
+        stale_ms = self._stale_ms
+
+        def spin(lo, hi, tip, step=10):
+            w = QtWidgets.QSpinBox()
+            w.setRange(lo, hi)
+            w.setSingleStep(step)
+            w.setSuffix(" ms")
+            w.setToolTip(tip)
+            w.valueChanged.connect(self._on_stab_edit)
+            return w
+
+        def dspin(tip):
+            w = QtWidgets.QDoubleSpinBox()
+            w.setRange(0.0, 1.0)
+            w.setDecimals(2)
+            w.setSingleStep(0.01)
+            w.setToolTip(tip)
+            w.valueChanged.connect(self._on_stab_edit)
+            return w
+
+        self.stab_enable = QtWidgets.QCheckBox("Enable stabilization")
+        self.stab_enable.setToolTip(TIPS["enable"])
+        self.stab_enable.toggled.connect(self._on_stab_edit)
+        bl.addWidget(self.stab_enable)
+        form = QtWidgets.QFormLayout()
+        self.stab_up = spin(0, 1000, TIP_CONFIRM.format(d="higher-s"))
+        self.stab_down = spin(0, 1000, TIP_CONFIRM.format(d="lower-s"))
+        form.addRow("Upward confirmation", self.stab_up)
+        form.addRow("Downward confirmation", self.stab_down)
+        bl.addLayout(form)
+        row = QtWidgets.QHBoxLayout()
+        self.btn_stab_apply = QtWidgets.QPushButton("Apply settings")
+        self.btn_stab_defaults = QtWidgets.QPushButton("Restore defaults")
+        self.btn_stab_reset = QtWidgets.QPushButton("Reset state")
+        self.btn_stab_defaults.setToolTip(TIPS["defaults"])
+        self.btn_stab_reset.setToolTip(TIPS["reset"])
+        self.btn_stab_apply.clicked.connect(self.apply_stabilization)
+        self.btn_stab_defaults.clicked.connect(self.restore_stabilization_defaults)
+        self.btn_stab_reset.clicked.connect(
+            lambda: self.engine.reset_stabilization("user_stabilization_reset"))
+        for b in (self.btn_stab_apply, self.btn_stab_defaults, self.btn_stab_reset):
+            row.addWidget(b)
+        bl.addLayout(row)
+        self.stab_draft_label = QtWidgets.QLabel()
+        self.stab_draft_label.setWordWrap(True)
+        bl.addWidget(self.stab_draft_label)
+
+        self.btn_stab_advanced = QtWidgets.QToolButton()
+        self.btn_stab_advanced.setText("Advanced")
+        self.btn_stab_advanced.setCheckable(True)
+        self.btn_stab_advanced.setToolButtonStyle(QtCore.Qt.ToolButtonTextBesideIcon)
+        self.btn_stab_advanced.setArrowType(QtCore.Qt.RightArrow)
+        self.btn_stab_advanced.setAutoRaise(True)
+        bl.addWidget(self.btn_stab_advanced)
+        self.stab_advanced = QtWidgets.QWidget()
+        form = QtWidgets.QFormLayout(self.stab_advanced)
+        form.setContentsMargins(12, 0, 0, 0)
+        self.stab_startup = spin(0, 1000, TIPS["startup"])
+        self.stab_gate = QtWidgets.QCheckBox("Enable probability gate")
+        self.stab_gate.setToolTip(TIPS["gate"])
+        self.stab_gate.toggled.connect(self._on_stab_edit)
+        self.stab_minp = dspin(TIPS["minp"])
+        self.stab_margin = dspin(TIPS["margin"])
+        self.stab_gap = spin(1, stale_ms, TIPS["gap"])
+        self.stab_hold = spin(100, 10000, TIPS["hold"], step=100)
+        form.addRow("Startup confirmation", self.stab_startup)
+        form.addRow(self.stab_gate)
+        form.addRow("Min. candidate probability", self.stab_minp)
+        form.addRow("Min. probability margin", self.stab_margin)
+        form.addRow("Max. evidence gap", self.stab_gap)
+        form.addRow("Max. unsupported hold", self.stab_hold)
+        self.stab_advanced.setVisible(False)
+        self.btn_stab_advanced.toggled.connect(self._toggle_advanced)
+        bl.addWidget(self.stab_advanced)
+        return box
 
     # -- model --------------------------------------------------------------------
     def _choose_model(self):
@@ -437,10 +622,92 @@ class LiveClassifierDashboard(QtWidgets.QWidget):
                      and not running)
         _set_enabled(self.log_check, not running)
         _set_enabled(self.btn_log_dir, not running)
+        _set_enabled(self.btn_stab_reset, running)
         blockers = [b for b in self.start_blockers() if b != "running"]
         text = (f"<span style='color:#c62828'>{self.start_error}</span>" if self.start_error
                 else "" if running or not blockers else "Start needs: " + " · ".join(blockers))
         self.blocker_label.setText(f"<div align='left'>{text}</div>" if text else "")
+
+    # -- output stabilization -----------------------------------------------------------
+    @property
+    def _stale_ms(self) -> int:
+        return int(round(self.engine.settings.stale_s * 1000))
+
+    def _toggle_advanced(self, on: bool):
+        self.btn_stab_advanced.setArrowType(QtCore.Qt.DownArrow if on else QtCore.Qt.RightArrow)
+        self.stab_advanced.setVisible(on)
+
+    def stab_draft(self) -> StabilizerSettings:
+        """The settings in the controls (not yet active)."""
+        return StabilizerSettings(
+            enabled=self.stab_enable.isChecked(), up_ms=self.stab_up.value(),
+            down_ms=self.stab_down.value(), startup_ms=self.stab_startup.value(),
+            gate=self.stab_gate.isChecked(), min_probability=round(self.stab_minp.value(), 2),
+            min_margin=round(self.stab_margin.value(), 2), max_gap_ms=self.stab_gap.value(),
+            max_unsupported_ms=self.stab_hold.value())
+
+    def _set_stab_controls(self, st: StabilizerSettings, keep_enabled: bool = False):
+        widgets = (self.stab_enable, self.stab_up, self.stab_down, self.stab_startup,
+                   self.stab_gate, self.stab_minp, self.stab_margin, self.stab_gap,
+                   self.stab_hold)
+        for w in widgets:
+            w.blockSignals(True)
+        if not keep_enabled:
+            self.stab_enable.setChecked(st.enabled)
+        self.stab_up.setValue(st.up_ms)
+        self.stab_down.setValue(st.down_ms)
+        self.stab_startup.setValue(st.startup_ms)
+        self.stab_gate.setChecked(st.gate)
+        self.stab_minp.setValue(st.min_probability)
+        self.stab_margin.setValue(st.min_margin)
+        self.stab_gap.setValue(st.max_gap_ms)
+        self.stab_hold.setValue(st.max_unsupported_ms)
+        for w in widgets:
+            w.blockSignals(False)
+        self._on_stab_edit()
+
+    @property
+    def stab_dirty(self) -> bool:
+        return self.stab_draft() != self.engine.stabilizer_settings
+
+    def _on_stab_edit(self, *_):
+        draft = self.stab_draft()
+        errors = draft.errors(self._stale_ms)
+        active = self.engine.stabilizer_settings
+        dirty = draft != active
+        _set_enabled(self.btn_stab_apply, dirty and not errors)
+        if errors:
+            head = "<span style='color:#c62828'><b>Invalid:</b> " + "; ".join(errors) + "</span>"
+        elif dirty:
+            head = ("<span style='color:#ef6c00'><b>Unapplied changes</b> — click "
+                    "<i>Apply settings</i> to use them.</span>")
+        else:
+            head = "No unapplied changes."
+        note = f"<br><span style='color:#ef6c00'>{self.stab_note}</span>" if self.stab_note else ""
+        html = (f"{head}<br><small>Active (rev {self.engine.stabilizer_revision}): "
+                f"{_summary(active)}</small>{note}")
+        if self.stab_draft_label.text() != html:
+            self.stab_draft_label.setText(html)
+
+    def apply_stabilization(self) -> bool:
+        """Make the draft active (atomic, new revision, state cleared) and persist it.
+        Classification, the model and any recording keep running."""
+        draft = self.stab_draft()
+        try:
+            self.engine.set_stabilization(draft)
+        except ValueError as e:
+            self.stab_note = f"Not applied: {e}"
+            self._on_stab_edit()
+            return False
+        save_stabilization(self.store, draft)
+        self.stab_note = ""
+        self._shown = None
+        self._on_stab_edit()
+        return True
+
+    def restore_stabilization_defaults(self):
+        """Defaults into the draft controls (Enable kept); Apply makes them active."""
+        self._set_stab_controls(StabilizerSettings(), keep_enabled=True)
 
     # -- run control ------------------------------------------------------------------
     def _choose_log_root(self):
@@ -473,7 +740,10 @@ class LiveClassifierDashboard(QtWidgets.QWidget):
             "settings": asdict(self.engine.settings),
             "window": {"samples": m.window_samples, "hop_samples": m.hop_samples,
                        "units": "samples"},
-            "output": "raw model output: no smoothing, voting, rest gate or thresholds",
+            "output": ("predictions.csv: raw model output (no smoothing, voting, rest gate or "
+                       "thresholds). Display: raw output, or the stabilized command while "
+                       "stabilization is ON (stabilization.csv; changes in events.csv)"),
+            "stabilization": self.engine.stabilization_info(),
             "labels": "none: no ground truth is recorded or inferred",
             "note": NOTE.replace("\n", " "),
         }
@@ -510,17 +780,23 @@ class LiveClassifierDashboard(QtWidgets.QWidget):
         now = self._clock()
         snap = self.engine.snapshot()
         cur = snap.current(now)
+        stab = snap.stable(now)
         state = STALE if snap.state == RUNNING and cur is None else snap.state
         drew = False
-        key = (snap.version, cur.pred_id if cur else None, state, self.loading)
+        key = (snap.version, cur.pred_id if cur else None, state, self.loading,
+               stab is not None)
         if key != self._shown:
             self._shown = key
-            self._show_prediction(cur, state, snap.reason, snap)
+            self._show_prediction(cur, state, snap.reason, snap, stab)
             if cur is not None and cur.pred_id != self._applied_id:
                 self._applied_id = cur.pred_id
                 ms = cur.age(now) * 1000
                 self._t_gui.append(ms)
-                self.engine.log_display(cur.pred_id, now, ms)
+                st = snap.stabilization
+                on = st.enabled
+                shown = (stab.accepted if stab is not None else "") if on else cur.prediction.label
+                self.engine.log_display(cur.pred_id, now, ms, "stabilized" if on else "raw",
+                                        st.revision, shown)
             drew = True
         if (snap.version != self._hist_version or self.engine.running) \
                 and now - self._hist_t >= 0.1:
@@ -536,17 +812,36 @@ class LiveClassifierDashboard(QtWidgets.QWidget):
             self.redraw_count += 1
         return drew
 
-    def _show_prediction(self, cur, state: str, reason: str, snap):
+    def _show_prediction(self, cur, state: str, reason: str, snap, stab):
         p = cur.prediction if cur is not None else None
-        self.s_label.setText(f"s = {p.s_discrete:g}" if p is not None else "s = --")
-        self.class_label.setText(p.label.upper() if p is not None else "--")
+        st = snap.stabilization if snap is not None else None
+        on = st is not None and st.enabled
+        if on:
+            self.mode_label.setText("Stabilized command")
+            self.s_label.setText(f"s = {stab.s:g}" if stab is not None else "s = --")
+            self.class_label.setText(stab.accepted.upper() if stab is not None else "--")
+            self.raw_label.setText(f"Raw: {p.label.upper()} (s = {p.s_discrete:g})"
+                                   if p is not None else "Raw: --")
+        else:
+            self.mode_label.setText("Raw output — stabilization OFF")
+            self.s_label.setText(f"s = {p.s_discrete:g}" if p is not None else "s = --")
+            self.class_label.setText(p.label.upper() if p is not None else "--")
+            self.raw_label.setText("")
         label = "LOADING MODEL" if self.loading else state.replace("_", " ")
         if state == WARMING_UP and snap is not None:
             label += f" · {snap.warm[0]}/{snap.warm[1]} samples"
         if reason and state != RUNNING:
             label += f" · {reason}"
-        self.state_label.setText(label)
+        self.state_label.setText("Input / engine: " + label)
         self.state_label.setColors(STATE_COLORS.get(state, "#757575"), "white")
+        if st is None:
+            text, status = "Stabilization: --", OFF
+        else:
+            text, status = describe(st), st.status
+            if on and st.accepted is not None and stab is None:
+                text, status = "Output unavailable: no fresh evidence", UNSUPPORTED
+        self.stab_label.setText(("Stabilization: " if on else "") + text)
+        self.stab_label.setColors(STAB_COLORS.get(status, "#757575"), "white")
         self.bars.set_probabilities(p.probabilities if p is not None else None)
         self.soft_label.setText(
             f"soft class score {p.s_expected:.2f}<br><small>0·p_low + 0.5·p_medium + 1·p_high; "
@@ -554,9 +849,20 @@ class LiveClassifierDashboard(QtWidgets.QWidget):
             else "soft class score --")
 
     def _draw_history(self, now: float):
+        lo = now - HISTORY_S - 1
+        sh, marks = self.engine.stabilized_history()
+        sh = sh[sh[:, 0] >= lo]
+        if len(sh):
+            t = sh[:, 0] - now
+            self.stab_curve.setData(np.repeat(t, 2)[1:], np.repeat(sh[:, 1], 2)[:-1],
+                                    connect="finite")
+        else:
+            self.stab_curve.setData([], [])
+        m = marks[marks >= lo] - now
+        self.mark_curve.setData(np.repeat(m, 2), np.tile([-0.1, 1.1], len(m)), connect="pairs")
         h = self.engine.history()
         if len(h):
-            h = h[h[:, 0] >= now - HISTORY_S - 1]
+            h = h[h[:, 0] >= lo]
         if len(h) == 0:
             for c in (self.s_curve, self.soft_curve):
                 c.setData([], [])
@@ -585,6 +891,8 @@ class LiveClassifierDashboard(QtWidgets.QWidget):
         else:
             log_line = (f"Log: {log.folder.name} · rows {sum(log.written.values())} · dropped "
                         f"{log.dropped}" + (f" · <b>error {log.error}</b>" if log.error else ""))
+        st = snap.stabilization
+        sc = st.counters
         lines = [
             (f"Model window {m.window_samples} samples / {m.hop_samples}-sample hop"
              if m else "Model window: --"),
@@ -602,8 +910,15 @@ class LiveClassifierDashboard(QtWidgets.QWidget):
             f"{c.get('rejected_samples', 0)}",
             f"Resets: {resets} · stale events {c.get('stale_events', 0)} · errors "
             f"{c.get('errors', 0)}",
+            f"Stabilization rev {st.revision} {'ON' if st.enabled else 'OFF'}: raw class changes "
+            f"{sc.get('raw_changes', 0)} · accepted {sc.get('accepted_changes', 0)} "
+            f"(+{sc.get('initial_acceptances', 0)} initial) · cancelled "
+            f"{sc.get('cancelled_candidates', 0)} · gate fails {sc.get('gate_failures', 0)} · "
+            f"hold expiries {sc.get('unsupported_expiries', 0)} · update "
+            f"{_fmt_ms(t['stabilization_ms'])}",
             log_line,
             "<small>Host-side only: not contraction-to-display, sensor→host or "
-            "display-onset latency.</small>",
+            "display-onset latency. A stabilization confirmation (receipt-time evidence) "
+            "adds to all delays above.</small>",
         ]
         self.diag_label.setText("<div align='left'>" + "<br>".join(lines) + "</div>")
