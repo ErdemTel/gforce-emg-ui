@@ -1,7 +1,9 @@
 """Main window: control panel (device, battery, contact, settings, recording)
-plus dashboards in tabs. Only the visible dashboard is redrawn."""
+plus dashboards in tabs. Only the visible dashboard is redrawn; the status bar shows on
+every tab when the Live Classifier's robot output is armed."""
 
 from pathlib import Path
+from typing import Optional, Tuple
 
 import numpy as np
 from PyQt5 import QtCore, QtGui, QtWidgets
@@ -59,7 +61,10 @@ class ContactStrip(QtWidgets.QWidget):
 
 
 class MainWindow(QtWidgets.QMainWindow):
-    def __init__(self, hub: DataHub, source: Source, data_dir: Path):
+    def __init__(self, hub: DataHub, source: Source, data_dir: Path,
+                 robot_target: Optional[Tuple[str, int]] = None):
+        """robot_target: (ip, port) prefilled in the Live Classifier's robot output (CLI
+        --robot-udp); never arms it."""
         super().__init__()
         self.hub = hub
         self.source = source
@@ -77,7 +82,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.equal = EqualScaleDashboard(hub)
         self.detail = DetailDashboard(hub)
         self.imu = ImuDashboard(hub)
-        self.live = LiveClassifierDashboard(hub, source)
+        self.live = LiveClassifierDashboard(hub, source, robot_target=robot_target)
         self.tabs = QtWidgets.QTabWidget()
         self.tabs.addTab(self.equal, "EMG – Equal scale")
         self.tabs.addTab(self.detail, "EMG – Detail")
@@ -99,6 +104,12 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.status_text = QtWidgets.QLabel()
         self.statusBar().addPermanentWidget(self.status_text, 1)
+        self.robot_indicator = QtWidgets.QLabel()       # visible on every tab while armed
+        self.robot_indicator.setStyleSheet("background:#c62828; color:white; "
+                                           "font-weight:bold; padding:1px 8px;")
+        self.robot_indicator.setVisible(False)
+        self.statusBar().addPermanentWidget(self.robot_indicator)
+        self.live.robot_armed.connect(self._on_robot_armed)
 
         source.state_changed.connect(self._on_state_changed)
         source.devices_found.connect(self._on_devices)
@@ -387,6 +398,12 @@ class MainWindow(QtWidgets.QMainWindow):
     def _set_status(self, msg: str):
         self.statusBar().showMessage(msg, 10000)
 
+    def _on_robot_armed(self, armed: bool, target: str):
+        text = f"ROBOT OUTPUT ARMED → {target}" if armed else ""
+        if self.robot_indicator.text() != text:
+            self.robot_indicator.setText(text)
+        self.robot_indicator.setVisible(armed)
+
     # -- recording --------------------------------------------------------------
     def _choose_folder(self):
         d = QtWidgets.QFileDialog.getExistingDirectory(self, "Recording folder", str(self.recorder.root))
@@ -467,6 +484,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._age_ms = age if not self._age_ms else 0.9 * self._age_ms + 0.1 * age
 
     def _refresh_status(self):
+        self.live.robot_tick()              # any tab: auto-disarm checks, indicator
         imp = self.hub.impedance
         self.contact_strip.update_contact(imp)
         self.equal.update_contact(imp)
@@ -512,6 +530,7 @@ class MainWindow(QtWidgets.QMainWindow):
         return f"⚠ {errs} subscriber errors · " if errs else ""
 
     def closeEvent(self, event):
+        self.live.disarm_robot("app closing")   # at once, even if a recording delays the close
         if self.collection.state == REVIEW:   # not accepted: deleted like a rejected attempt
             self.collection.submit_review("reject", comment="app closed before review")
         if self.recorder.busy or self.collection.busy:

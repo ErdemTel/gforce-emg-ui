@@ -1,18 +1,19 @@
-"""Entry point: python -m gforce_emg_ui [--simulate]"""
+"""Entry point: python -m gforce_emg_ui [--simulate] [--robot-udp HOST:PORT]"""
 
 import argparse
 import signal
 import sys
 from pathlib import Path
 
-import pyqtgraph as pg
 from PyQt5 import QtCore, QtWidgets
 
 from .config import DEFAULT_EMG_RATE, EMG_RATES, PACKAGE_SAMPLE_COUNT
 from .hub import DataHub
+from .live.robot_out import DEFAULT_PORT, parse_target
 
 
-def main(argv=None):
+def parse_args(argv=None) -> argparse.Namespace:
+    """Command line; invalid combinations exit via ap.error. Sets args.robot_target."""
     ap = argparse.ArgumentParser(prog="gforce_emg_ui", description=__doc__)
     ap.add_argument("--simulate", action="store_true", help="use synthetic data instead of the band")
     ap.add_argument("--emg-rate", type=int, choices=EMG_RATES, default=DEFAULT_EMG_RATE)
@@ -23,9 +24,25 @@ def main(argv=None):
     ap.add_argument("--sim-contact", choices=("default", "good"), default="default",
                     help="simulator only: electrode-contact scenario ('good' = all 8 "
                          "channels good)")
+    ap.add_argument("--robot-udp", metavar="HOST:PORT",
+                    help="prefill the Live Classifier's robot output target (IP literal, "
+                         f"e.g. 127.0.0.1:{DEFAULT_PORT} or [::1]:{DEFAULT_PORT}); never arms "
+                         "it, sending still needs 'Send to robot' and a confirmation")
     args = ap.parse_args(argv)
     if args.sim_contact != "default" and not args.simulate:
         ap.error("--sim-contact requires --simulate")
+    args.robot_target = None
+    if args.robot_udp is not None:
+        try:
+            args.robot_target = parse_target(args.robot_udp)
+        except ValueError as e:
+            ap.error(f"--robot-udp: {e}")
+    return args
+
+
+def main(argv=None):
+    args = parse_args(argv)
+    import pyqtgraph as pg                  # GUI only (parse_args() works without it)
 
     app = QtWidgets.QApplication(sys.argv[:1])
     pg.setConfigOptions(antialias=False, background="w", foreground="k")
@@ -39,7 +56,7 @@ def main(argv=None):
         source = SdkSource(hub, args.emg_rate, args.package_samples)
 
     from .ui.main_window import MainWindow
-    win = MainWindow(hub, source, args.data_dir)
+    win = MainWindow(hub, source, args.data_dir, robot_target=args.robot_target)
     win.show()
 
     # Let Ctrl-C in the terminal close the app

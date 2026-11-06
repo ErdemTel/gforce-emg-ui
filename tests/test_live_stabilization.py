@@ -68,8 +68,10 @@ class Seq:
 
 
 def test_stabilization_module_is_qt_free():
+    import gforce_emg_ui.live.robot_out as r
     import gforce_emg_ui.live.stabilization as m
-    assert "PyQt5" not in open(m.__file__).read()
+    for mod in (m, r):
+        assert "PyQt5" not in open(mod.__file__).read(), mod.__name__
 
 
 def test_settings_defaults_and_validation():
