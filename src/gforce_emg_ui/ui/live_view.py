@@ -43,6 +43,7 @@ from ..live.stabilization import (CONFIRMING, GATE_NOT_MET, HOLDING, OFF, PENDIN
                                   describe)
 from ..sources import DISCONNECTING, FAILED, IDLE, RECONNECTING, STREAMING
 from .collection_panel import LiveText
+from .gain_table_panel import GainTablePanel
 
 NOTE = ("Instructed-effort prediction, not measured stiffness.\n"
         "Low was trained as minimal effort while maintaining the grasp/fist;\n"
@@ -224,8 +225,11 @@ class LiveClassifierDashboard(QtWidgets.QWidget):
 
     def __init__(self, hub, source, parent=None, settings: Optional[LiveSettings] = None,
                  log_root: Optional[Path] = None, clock=time.monotonic, store=None,
-                 robot_target: Optional[Tuple[str, int]] = None):
+                 robot_target: Optional[Tuple[str, int]] = None,
+                 emg_producer: bool = False, managed_output: bool = False):
         super().__init__(parent)
+        self.managed_output = bool(managed_output)
+        self.emg_producer = bool(emg_producer or managed_output)
         self.hub = hub
         self.source = source
         self._clock = clock
@@ -238,7 +242,7 @@ class LiveClassifierDashboard(QtWidgets.QWidget):
         target = target or RobotOutputSettings()
         if robot_target is not None:                 # --robot-udp: prefill only, never arm
             target = replace(target, host=robot_target[0], port=int(robot_target[1]))
-        self.robot = RobotOutput(self.engine, target, clock=clock,
+        self.robot = RobotOutput(self.engine, target, clock=clock, emg_only=self.emg_producer,
                                  simulated=bool(getattr(source, "is_simulation", False)))
         self._robot_signalled = (False, target.target)
         self.model = None
@@ -282,8 +286,14 @@ class LiveClassifierDashboard(QtWidgets.QWidget):
         scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
         scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
         scroll.setFixedWidth(440)
+        self.source_box = self._build_source_mode()
+        self.source_box.setVisible(not self.emg_producer)
+        self.source_mode.setEnabled(not self.emg_producer)
+        lv.addWidget(self.source_box)
+        self.classifier_boxes = []
 
         box = QtWidgets.QGroupBox("Model")
+        self.classifier_boxes.append(box)
         bl = QtWidgets.QVBoxLayout(box)
         self.btn_load = QtWidgets.QPushButton("Load model…")
         self.btn_load.clicked.connect(self._choose_model)
@@ -294,11 +304,12 @@ class LiveClassifierDashboard(QtWidgets.QWidget):
         bl.addWidget(self.model_label)
         lv.addWidget(box)
 
-        box = QtWidgets.QGroupBox("Run")
+        box = QtWidgets.QGroupBox("Classifier" if self.emg_producer else "Run")
+        self.classifier_boxes.append(box)
         bl = QtWidgets.QVBoxLayout(box)
         row = QtWidgets.QHBoxLayout()
-        self.btn_start = QtWidgets.QPushButton("Start")
-        self.btn_stop = QtWidgets.QPushButton("Stop")
+        self.btn_start = QtWidgets.QPushButton("Start classifier" if self.emg_producer else "Start")
+        self.btn_stop = QtWidgets.QPushButton("Stop classifier" if self.emg_producer else "Stop")
         self.btn_reset = QtWidgets.QPushButton("Reset buffer")
         for b in (self.btn_start, self.btn_stop, self.btn_reset):
             row.addWidget(b)
@@ -320,9 +331,12 @@ class LiveClassifierDashboard(QtWidgets.QWidget):
         self.log_dir_label.setWordWrap(True)
         bl.addWidget(self.log_dir_label)
         lv.addWidget(box)
-        lv.addWidget(self._build_stabilization())
+        stab_box = self._build_stabilization()
+        self.classifier_boxes.append(stab_box)
+        lv.addWidget(stab_box)
 
         box = QtWidgets.QGroupBox("Compatibility")
+        self.classifier_boxes.append(box)
         bl = QtWidgets.QVBoxLayout(box)
         self.compat_label = QtWidgets.QLabel()
         self.compat_label.setWordWrap(True)
@@ -333,7 +347,24 @@ class LiveClassifierDashboard(QtWidgets.QWidget):
         self.ack_check.toggled.connect(self._update_controls)
         bl.addWidget(self.ack_check)
         lv.addWidget(box)
-        lv.addWidget(self._build_robot())
+        self.output_box = self._build_robot()
+        self.output_box.setVisible(not self.managed_output)
+        lv.addWidget(self.output_box)
+        if self.managed_output:
+            note = QtWidgets.QLabel(
+                "Robot start/pause, Manual/EMG selection and verified gains are in the "
+                "Robot control tab. Start the classifier here; EMG predictions are sent "
+                "automatically after you select EMG there.")
+            note.setWordWrap(True)
+            lv.addWidget(note)
+        self.gain_panel = None
+        if not self.emg_producer:
+            self.gain_panel = GainTablePanel(
+                self.store, lambda: (self.robot_host.text().strip(), self.robot_port.value()))
+            self.robot_host.textChanged.connect(self.gain_panel.target_changed)
+            self.robot_port.valueChanged.connect(self.gain_panel.target_changed)
+            self.gain_panel.busy_changed.connect(lambda _: self._update_robot_controls())
+            lv.addWidget(self.gain_panel)
 
         lv.addStretch(1)
 
@@ -404,7 +435,9 @@ class LiveClassifierDashboard(QtWidgets.QWidget):
         row.addStretch(1)
         row.addWidget(QtWidgets.QLabel("<small>gaps = no output · grey = reset / settings "
                                        "change · stabilized = raw when OFF</small>"))
-        right.addLayout(row)
+        self.history_controls = QtWidgets.QWidget()
+        self.history_controls.setLayout(row)
+        right.addWidget(self.history_controls)
         right.addWidget(self.plot, 1)
         box = QtWidgets.QGroupBox("Diagnostics (host-side)")
         bl = QtWidgets.QVBoxLayout(box)
@@ -414,11 +447,173 @@ class LiveClassifierDashboard(QtWidgets.QWidget):
         note = QtWidgets.QLabel(NOTE)
         note.setStyleSheet("color:#52514e; padding:4px; border-top:1px solid #e1e0d9;")
         right.addWidget(note)
+        self.classifier_visuals = [bars_title, self.bars, self.soft_label, self.history_controls,
+                                   self.plot, box, note]
+        self.manual_help = QtWidgets.QLabel(
+            "Manual commands use the same stiffness gain table as EMG commands.\n\n"
+            "Select a level and enable Send to robot, then arm the bridge.\n"
+            "Watch robot: applied s for confirmation; the selected level may still be waiting.\n\n"
+            "Uncheck Send to robot to stop requests. The hand keeps its last applied gains.\n"
+            "Switching back to EMG leaves the classifier and sending stopped.")
+        self.manual_help.setWordWrap(True)
+        self.manual_help.setAlignment(QtCore.Qt.AlignTop | QtCore.Qt.AlignLeft)
+        self.manual_help.setStyleSheet("padding:16px; color:#424242;")
+        self.manual_help.hide()
+        right.addWidget(self.manual_help, 1)
 
         layout = QtWidgets.QHBoxLayout(self)
         layout.addWidget(scroll)
         layout.addLayout(right, 1)
         self._show_prediction(None, NO_MODEL, "", None, None)
+
+    @property
+    def manual_mode(self) -> bool:
+        return self.robot.mode != robot_out.EMG
+
+    @property
+    def direct_mode(self) -> bool:
+        return self.robot.mode == robot_out.GAINS
+
+    def _build_source_mode(self):
+        box = QtWidgets.QGroupBox("Stiffness source")
+        layout = QtWidgets.QVBoxLayout(box)
+        self.source_mode = QtWidgets.QComboBox()
+        self.source_mode.addItem("EMG classifier", robot_out.EMG)
+        self.source_mode.addItem("Manual (classifier off)", robot_out.MANUAL)
+        self.source_mode.addItem("Manual Kp/Kd (classifier off)", robot_out.GAINS)
+        self.source_mode.currentIndexChanged.connect(self._source_mode_changed)
+        layout.addWidget(self.source_mode)
+        self.manual_controls = QtWidgets.QWidget()
+        controls = QtWidgets.QVBoxLayout(self.manual_controls)
+        controls.setContentsMargins(0, 0, 0, 0)
+        row = QtWidgets.QHBoxLayout()
+        self.manual_group = QtWidgets.QButtonGroup(self)
+        self.manual_buttons = {}
+        for level, label in ((0.0, "0 · Low"), (0.5, "0.5 · Medium"), (1.0, "1 · High")):
+            button = QtWidgets.QPushButton(label)
+            button.setCheckable(True)
+            button.setMinimumHeight(36)
+            button.clicked.connect(lambda _, s=level: self._select_manual(s))
+            self.manual_group.addButton(button)
+            self.manual_buttons[level] = button
+            row.addWidget(button)
+        controls.addLayout(row)
+        note = QtWidgets.QLabel(
+            "No band or model needed. Select a level, then enable Send to robot. "
+            "While sending, each selection requests that level. The robot may take time "
+            "to apply it; check its applied s below.")
+        note.setWordWrap(True)
+        controls.addWidget(note)
+        self.manual_controls.hide()
+        layout.addWidget(self.manual_controls)
+        self.direct_controls = QtWidgets.QWidget()
+        direct = QtWidgets.QVBoxLayout(self.direct_controls)
+        direct.setContentsMargins(0, 0, 0, 0)
+        form = QtWidgets.QFormLayout()
+        self.direct_kp, self.direct_kd = QtWidgets.QDoubleSpinBox(), QtWidgets.QDoubleSpinBox()
+        for name, widget, initial in (("Kp", self.direct_kp, .6),
+                                      ("Kd", self.direct_kd, .8)):
+            widget.setDecimals(4)
+            widget.setRange(0.0, 1.0)
+            widget.setSingleStep(.01)
+            # Typing updates only the draft; the sender changes only on Apply.
+            widget.setKeyboardTracking(True)
+            widget.setValue(initial)
+            widget.valueChanged.connect(self._direct_edited)
+            widget.lineEdit().textEdited.connect(self._direct_edited)
+            form.addRow(f"{name} baseline multiplier", widget)
+        direct.addLayout(form)
+        self.direct_apply = QtWidgets.QPushButton("Apply gains")
+        self.direct_apply.clicked.connect(self._apply_direct)
+        direct.addWidget(self.direct_apply)
+        self.direct_status = QtWidgets.QLabel()
+        self.direct_status.setWordWrap(True)
+        direct.addWidget(self.direct_status)
+        note = QtWidgets.QLabel(
+            "Scales each joint's baseline Kp and Kd; does not change the 0 / 0.5 / 1 presets. "
+            "Edit both fields, then click Apply gains. While Send to robot is on, this "
+            "requests the new pair. Each multiplier accepts 0–1 independently. "
+            "Check the applied multipliers in robot feedback. "
+            "Kp = 0 removes position stiffness; Kd = 0 removes damping. "
+            "Zero does not turn off the motors. Restore positive Kd before homing.")
+        note.setWordWrap(True)
+        direct.addWidget(note)
+        self.direct_controls.hide()
+        layout.addWidget(self.direct_controls)
+        self._direct_edited()
+        return box
+
+    def _direct_edited(self, *_):
+        if not all(w.hasAcceptableInput() for w in (self.direct_kp, self.direct_kd)):
+            self.direct_status.setText("Enter both multipliers between 0 and 1.")
+            self.direct_apply.setEnabled(False)
+            return
+        pair = self.direct_kp.value(), self.direct_kd.value()
+        try:
+            robot_out.validate_pair(*pair)
+        except ValueError as error:
+            self.direct_status.setText(str(error))
+            self.direct_apply.setEnabled(False)
+            return
+        selected = pair == self.robot.manual_gains
+        self.direct_apply.setEnabled(not selected)
+        self.direct_status.setText("Selected pair — see robot feedback for applied gains."
+                                   if selected else "Draft — click Apply gains to select this pair.")
+
+    def _apply_direct(self):
+        if not self.direct_mode or not all(
+                w.hasAcceptableInput() for w in (self.direct_kp, self.direct_kd)):
+            return
+        self.robot.select_gains(self.direct_kp.value(), self.direct_kd.value())
+        self._direct_edited()
+        self._shown = None
+        self._update_controls()
+        self.refresh()
+
+    def _source_mode_changed(self, _index):
+        if self.emg_producer:
+            # Hidden controls cannot turn the producer into a manual robot controller.
+            self.source_mode.blockSignals(True)
+            self.source_mode.setCurrentIndex(0)
+            self.source_mode.blockSignals(False)
+            return
+        # The old session sends stop before the new source can send anything.
+        self.disarm_robot("stiffness source changed")
+        self.engine.stop("stiffness source changed")
+        self.robot.set_mode(self.source_mode.currentData())
+        self.manual_group.setExclusive(False)
+        for button in self.manual_buttons.values():
+            button.setChecked(False)
+        self.manual_group.setExclusive(True)
+        self.manual_controls.setVisible(self.robot.mode == robot_out.MANUAL)
+        self.direct_controls.setVisible(self.direct_mode)
+        self._direct_edited()
+        self.manual_help.setText(
+            ("Manual Kp/Kd scales the joint-specific baseline gains.\n\n"
+             "Click Apply gains to select a pair, enable Send to robot, then arm the bridge.\n"
+             "You can edit and apply another pair while sending stays on.\n"
+             "Watch robot: applied Kp/Kd for readback confirmation.\n\n"
+             if self.direct_mode else
+             "Manual levels use the same stiffness gain table as EMG commands.\n\n"
+             "Select a level, enable Send to robot, then arm the bridge.\n"
+             "Watch robot: applied s for readback confirmation.\n\n")
+            + "Uncheck Send to robot to stop requests. The hand keeps its last applied gains.\n"
+              "Switching sources stops sending and requires a new session and bridge re-arm.")
+        for box in self.classifier_boxes:
+            box.setVisible(not self.manual_mode)
+        for widget in self.classifier_visuals:
+            widget.setVisible(not self.manual_mode)
+        self.manual_help.setVisible(self.manual_mode)
+        self.sim_label.setVisible(not self.manual_mode and self.robot.simulated)
+        self._shown = None
+        self._update_controls()
+        self.refresh()
+
+    def _select_manual(self, level):
+        self.robot.select_manual(level)
+        self._shown = None
+        self._update_controls()
+        self.refresh()
 
     def _build_stabilization(self) -> QtWidgets.QGroupBox:
         box = QtWidgets.QGroupBox("Output stabilization")
@@ -500,13 +695,23 @@ class LiveClassifierDashboard(QtWidgets.QWidget):
         return box
 
     def _build_robot(self) -> QtWidgets.QGroupBox:
-        box = QtWidgets.QGroupBox("Robot output (UDP)")
+        box = QtWidgets.QGroupBox("Prediction stream (UDP)" if self.emg_producer
+                                 else "Robot output (UDP)")
         bl = QtWidgets.QVBoxLayout(box)
+        if self.emg_producer:
+            self.producer_note = QtWidgets.QLabel(
+                "This app publishes EMG activation predictions only. Robot start/stop, "
+                "arming, manual gains and applied-gain status are in Sharpa Control. "
+                "Manual robot control works without this app.")
+            self.producer_note.setWordWrap(True)
+            bl.addWidget(self.producer_note)
         cfg = self.robot.settings
         form = QtWidgets.QFormLayout()
         self.robot_host = QtWidgets.QLineEdit(cfg.host)
         self.robot_host.setPlaceholderText("127.0.0.1")
-        self.robot_host.setToolTip(TIPS["robot_host"])
+        self.robot_host.setToolTip(
+            "IP address of the Sharpa Control prediction receiver." if self.emg_producer
+            else TIPS["robot_host"])
         self.robot_port = QtWidgets.QSpinBox()
         self.robot_port.setRange(1, 65535)
         self.robot_port.setValue(cfg.port)
@@ -515,21 +720,32 @@ class LiveClassifierDashboard(QtWidgets.QWidget):
         self.robot_port.valueChanged.connect(self._update_controls)
         self.robot_host.editingFinished.connect(self._save_robot_target)
         self.robot_port.editingFinished.connect(self._save_robot_target)
-        form.addRow("Robot IP", self.robot_host)
+        form.addRow("Receiver IP" if self.emg_producer else "Robot IP", self.robot_host)
         form.addRow("UDP port", self.robot_port)
         bl.addLayout(form)
-        self.robot_ack = QtWidgets.QCheckBox("Send despite the warnings / simulator")
+        self.robot_ack = QtWidgets.QCheckBox(
+            "Send predictions despite warnings / simulator" if self.emg_producer
+            else "Send despite the warnings / simulator")
         self.robot_ack.setToolTip(TIPS["robot_ack"])
         self.robot_ack.toggled.connect(self._update_controls)
         bl.addWidget(self.robot_ack)
-        self.robot_check = QtWidgets.QCheckBox("Send to robot")
-        self.robot_check.setToolTip(TIPS["robot_send"])
+        self.robot_check = QtWidgets.QCheckBox(
+            "Send predictions" if self.emg_producer else "Send to robot")
+        self.robot_check.setToolTip(
+            "Publish the displayed classifier level over UDP. This does not start or arm "
+            "robot control. Uncheck to stop the prediction stream; Sharpa Control handles "
+            "the robot response." if self.emg_producer else TIPS["robot_send"])
         self.robot_check.toggled.connect(self._on_robot_toggled)
         bl.addWidget(self.robot_check)
         self.robot_hint = QtWidgets.QLabel()
         self.robot_hint.setWordWrap(True)
         bl.addWidget(self.robot_hint)
-        self.robot_status = LiveText(lines=3, px=11, pad=6)    # changes every tick: no relayout
+        if self.emg_producer:
+            self.robot_status = QtWidgets.QLabel()
+            self.robot_status.setWordWrap(True)
+            self.robot_status.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
+        else:
+            self.robot_status = LiveText(lines=3, px=11, pad=6)
         bl.addWidget(self.robot_status)
         return box
 
@@ -627,13 +843,14 @@ class LiveClassifierDashboard(QtWidgets.QWidget):
         self._recheck()
 
     def _on_disconnected(self):
-        self.disarm_robot("band disconnected")
+        if not self.manual_mode:
+            self.disarm_robot("band disconnected")
         self._device, self._params = {}, {}
         self._recheck()
 
     def _on_state(self, _signalled=""):
         state = self.source.state                # queued signals may arrive out of order
-        if state != STREAMING:                   # disconnect, link lost, failed: robot
+        if state != STREAMING and not self.manual_mode:  # manual needs no band
             self.disarm_robot(f"band {state}")   # output never re-arms by itself
         if self.engine.running:
             if state in (IDLE, FAILED, DISCONNECTING):
@@ -683,6 +900,8 @@ class LiveClassifierDashboard(QtWidgets.QWidget):
 
     def start_blockers(self) -> list:
         out = []
+        if self.manual_mode:
+            out.append("switch to EMG classifier mode")
         if self.loading:
             out.append("model loading")
         elif self.model is None:
@@ -810,11 +1029,24 @@ class LiveClassifierDashboard(QtWidgets.QWidget):
 
     def _robot_needs_ack(self) -> bool:
         r = self.report
-        return r is not None and not r.blocking and (bool(r.needs_ack) or self.robot.simulated)
+        return not self.managed_output and not self.manual_mode and r is not None and not r.blocking and (
+            bool(r.needs_ack) or self.robot.simulated)
 
     def robot_blockers(self) -> list:
         """Why 'Send to robot' cannot be armed now ([] = it can)."""
         out = []
+        if self.manual_mode:
+            if self.direct_mode and self.robot.manual_gains is None:
+                out.append("click Apply gains to select a Kp/Kd pair")
+            elif not self.direct_mode and self.robot.manual_level is None:
+                out.append("select a manual stiffness level")
+            if self.engine.running:
+                out.append("stop the classifier")
+            if self.robot_draft().errors():
+                out.append("a valid robot IP and port")
+            if self.robot.armed:
+                out.append("armed")
+            return out
         if self.loading:
             out.append("model loading")
         elif self.model is None:
@@ -827,7 +1059,7 @@ class LiveClassifierDashboard(QtWidgets.QWidget):
         if r is not None and r.blocking:
             out.append("incompatible settings (see Compatibility)")
         elif self._robot_needs_ack() and not self.robot_ack.isChecked():
-            out.append("tick 'Send despite the warnings / simulator'")
+            out.append(f"tick '{self.robot_ack.text()}'")
         if self.robot_draft().errors():
             out.append("a valid robot IP and port")
         if self.robot.armed:
@@ -836,6 +1068,9 @@ class LiveClassifierDashboard(QtWidgets.QWidget):
 
     def robot_hints(self) -> list:
         """What the robot bridge ignores with its defaults (it decides; the UI still sends)."""
+        if self.manual_mode:
+            return ["Manual commands need accept_test_sender:=true on the bridge. "
+                    "Robot-side arming and write checks still apply."]
         st = self.engine.stabilizer_settings
         out = []
         if not st.enabled:
@@ -844,6 +1079,8 @@ class LiveClassifierDashboard(QtWidgets.QWidget):
             out.append(f"robot will ignore: a confirmation below {ROBOT_MIN_CONFIRM_MS} ms")
         if self.robot.simulated:
             out.append("robot will ignore: simulated (synthetic EMG)")
+        if self.emg_producer:
+            out.append("Robot control and applied gains are shown in Sharpa Control.")
         return out
 
     def _on_robot_toggled(self, on: bool):
@@ -855,14 +1092,41 @@ class LiveClassifierDashboard(QtWidgets.QWidget):
 
     def _confirm_robot(self, cfg: RobotOutputSettings) -> bool:
         acked = ""
+        explanation = ROBOT_CONFIRM
+        if self.emg_producer:
+            explanation = (
+                "Publish the displayed low / medium / high activation prediction. "
+                "Sharpa Control owns robot arming, gain selection and applied-gain status. "
+                "Starting this stream does not start robot control. A successful UDP send "
+                "does not confirm that the controller received or applied a prediction.")
+        elif self.direct_mode:
+            kp, kd = self.robot.manual_gains
+            explanation = (
+                f"MANUAL Kp/Kd: baseline multipliers Kp × {kp:g}, Kd × {kd:g}. "
+                "The classifier is off. Each click of Apply gains while sending requests "
+                "the selected pair. This can write real hand gains when the bridge is armed "
+                "with dry_run=false and accept_test_sender=true. The bridge's hold times, "
+                "rate limits and hardware checks still apply. Stopping output holds the "
+                "last gains; it does not disable the hand.")
+        elif self.manual_mode:
+            explanation = (
+                f"MANUAL mode: selected s = {self.robot.manual_level:g}. The classifier is off; "
+                "no band is needed. These are operator commands that can change real hand "
+                "gains when the bridge is armed with dry_run=false and accept_test_sender=true. "
+                "Each button change is held for 100 ms before sending its value; the bridge's "
+                "hold times, rate limits and hardware checks still apply. Uncheck Send to robot "
+                "to stop output; stopping holds the last gains, it does not disable the hand.")
         if self._robot_needs_ack():
             items = [c.label for c in self.report.needs_ack]
             items += ["simulated source"] if self.robot.simulated else []
             acked = "\n\nAcknowledged: " + ", ".join(items) + "."
+        prompt = (f"Publish classifier predictions to {cfg.target} (UDP, {cfg.rate_hz} Hz)?"
+                  if self.emg_producer else
+                  f"Send the shown stiffness command to the robot bridge at {cfg.target} (UDP, "
+                  f"{cfg.rate_hz} Hz + each change)?")
         answer = QtWidgets.QMessageBox.question(
-            self, "Send to robot?",
-            f"Send the shown stiffness command to the robot bridge at {cfg.target} (UDP, "
-            f"{cfg.rate_hz} Hz + each change)?\n\n{ROBOT_CONFIRM}{acked}",
+            self, "Send predictions?" if self.emg_producer else "Send to robot?",
+            f"{prompt}\n\n{explanation}{acked}",
             QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No, QtWidgets.QMessageBox.No)
         return answer == QtWidgets.QMessageBox.Yes
 
@@ -905,9 +1169,9 @@ class LiveClassifierDashboard(QtWidgets.QWidget):
         state = self.source.state
         if not self.robot.stats()["active"]:
             why = "sender thread ended"
-        elif state != STREAMING:
+        elif not self.manual_mode and state != STREAMING:
             why = f"band {state}"
-        elif not self.engine.running:
+        elif not self.manual_mode and not self.engine.running:
             snap = self.engine.snapshot()
             why = f"classifier stopped: {snap.reason or snap.state}"
         else:
@@ -947,17 +1211,22 @@ class LiveClassifierDashboard(QtWidgets.QWidget):
 
     def _update_robot_controls(self):
         armed = self.robot.armed
+        config_busy = bool(getattr(self, "gain_panel", None) and self.gain_panel.busy)
+        if getattr(self, "gain_panel", None) is not None:
+            self.gain_panel.set_output_active(armed)
         blockers = [b for b in self.robot_blockers() if b != "armed"]
-        _set_enabled(self.robot_check, armed or not blockers)
-        _set_enabled(self.robot_host, not armed)
-        _set_enabled(self.robot_port, not armed)
+        _set_enabled(self.robot_check, armed or (not blockers and not config_busy))
+        _set_enabled(self.robot_host, not armed and not config_busy)
+        _set_enabled(self.robot_port, not armed and not config_busy)
         _set_enabled(self.robot_ack, self._robot_needs_ack() and not armed)
+        self.robot_ack.setVisible(not self.manual_mode)
         lines = []
         errors = self.robot_draft().errors()
         if errors:
             lines.append("<span style='color:#c62828'>" + _esc("; ".join(errors)) + "</span>")
         if blockers and not armed:
-            lines.append("Send to robot needs: " + " · ".join(blockers))
+            action = "Send predictions" if self.emg_producer else "Send to robot"
+            lines.append(action + " needs: " + " · ".join(blockers))
         lines += [f"<span style='color:#ef6c00'>⚠ {h}</span>" for h in self.robot_hints()]
         if self.robot_note:
             lines.append(f"<span style='color:#ef6c00'>{_esc(self.robot_note)}</span>")
@@ -967,9 +1236,22 @@ class LiveClassifierDashboard(QtWidgets.QWidget):
 
     def _show_robot(self):
         st = self.robot.stats()
+        if self.emg_producer:
+            state = "ON" if st["armed"] else "OFF"
+            lines = [f"Prediction stream {state} → {st['target']}",
+                     f"UDP datagrams sent {st['sent']} · send errors {st['errors']}"]
+            lines.append("Controller feedback received. Robot status: Sharpa Control."
+                         if st["robot"] is not None else
+                         "No fresh controller feedback. UDP sending does not confirm receipt.")
+            if st["last_error"]:
+                lines.append(_esc(st["last_error"]))
+            self.robot_status.setText("<br>".join(lines))
+            return
         if st["armed"]:
             head = (f"<b style='color:#c62828'>SENDING</b> → {st['target']} · sent {st['sent']}"
-                    f" · errors {st['errors']} · last s {_fmt_s(st['last_s'])}")
+                    f" · errors {st['errors']}"
+                    + (" · manual Kp/Kd" if self.direct_mode
+                       else f" · last s {_fmt_s(st['last_s'])}"))
         elif st["session"] is None:
             head = "Not sending"
         else:
@@ -979,7 +1261,9 @@ class LiveClassifierDashboard(QtWidgets.QWidget):
         if r is None:
             robot = "robot state unknown"
         else:
-            robot = (f"robot: applied s {_fmt_s(r['applied_s'])} · phase {_esc(r['phase'])} · "
+            applied = (f"Kp × {_fmt_s(r.get('kp_ratio'))}, Kd × {_fmt_s(r.get('kd_ratio'))}"
+                       if self.direct_mode else f"s {_fmt_s(r['applied_s'])}")
+            robot = (f"robot: applied {applied} · phase {_esc(r['phase'])} · "
                      f"{'armed' if r['armed'] else 'disarmed'} · "
                      f"{'dry run' if r['dry_run'] else 'gain writes ON'}"
                      + (" · <b>latched</b>" if r["latched"] else ""))
@@ -1051,6 +1335,8 @@ class LiveClassifierDashboard(QtWidgets.QWidget):
         """App close: robot output first (its sender's last datagram is 'stop'; bounded
         wait), then stop classifying, let the threads exit, ignore late model loads."""
         self._closed = True
+        if self.gain_panel is not None:
+            self.gain_panel.close_client()
         self.robot.close(ROBOT_CLOSE_S, "app closed")
         self._robot_changed()
         self.engine.shutdown()
@@ -1067,7 +1353,7 @@ class LiveClassifierDashboard(QtWidgets.QWidget):
         state = STALE if snap.state == RUNNING and cur is None else snap.state
         drew = False
         key = (snap.version, cur.pred_id if cur else None, state, self.loading,
-               stab is not None)
+               stab is not None, self.robot.mode, self.robot.manual_level, self.robot.manual_gains)
         if key != self._shown:
             self._shown = key
             self._show_prediction(cur, state, snap.reason, snap, stab)
@@ -1097,6 +1383,27 @@ class LiveClassifierDashboard(QtWidgets.QWidget):
         return drew
 
     def _show_prediction(self, cur, state: str, reason: str, snap, stab):
+        if self.manual_mode:
+            level = self.robot.manual_level
+            self.mode_label.setText("Manual selection · classifier OFF")
+            if self.direct_mode:
+                pair = self.robot.manual_gains
+                self.s_label.setText(
+                    f"<span style='font-size:40px'>Kp × {pair[0]:g}<br>Kd × {pair[1]:g}</span>"
+                    if pair else "<span style='font-size:40px'>Kp / Kd = --</span>")
+                self.class_label.setText("BASELINE MULTIPLIERS")
+                self.raw_label.setText("Selected pair · see robot applied multipliers for readback")
+            else:
+                self.s_label.setText(f"s = {level:g}" if level is not None else "s = --")
+                self.class_label.setText({0.0: "LOW", 0.5: "MEDIUM", 1.0: "HIGH"}.get(level, "--"))
+                self.raw_label.setText("Selected command · see robot applied s for readback")
+            self.state_label.setText("Manual mode · no EMG required")
+            self.state_label.setColors("#1565c0", "white")
+            self.stab_label.setText("Button confirmation: 100 ms")
+            self.stab_label.setColors("#1565c0", "white")
+            self.bars.set_probabilities(None)
+            self.soft_label.setText("Classifier off · no scores")
+            return
         p = cur.prediction if cur is not None else None
         st = snap.stabilization if snap is not None else None
         on = st is not None and st.enabled

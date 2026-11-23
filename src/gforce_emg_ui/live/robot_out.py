@@ -19,6 +19,10 @@ thread only. Targets are IP literals (no DNS on the GUI or sender thread); multi
 broadcast and unspecified addresses are refused. Contract: design section 5.1-5.2 in the
 parent repository (docs/design_emg_stiffness_2026-11-02.md) and the golden vectors
 tests/data/emg-stiffness-v1-golden.json.
+
+Manual mode uses the same session/heartbeat/stop transport with source send_stiffness.
+It reads a locked operator selection instead of the engine, debounces it for 100 ms,
+and needs the bridge's accept_test_sender opt-in. Mode changes require disarming first.
 """
 
 import collections
@@ -36,12 +40,17 @@ from dataclasses import asdict, dataclass, fields
 from typing import Callable, List, Optional, Tuple
 
 from .engine import RUNNING
+from .direct_gains import validate_pair
 from .stabilization import OFF, describe
 
 PROTOCOL = "emg-stiffness/1"
+GAINS_PROTOCOL = "emg-gains/1"
 STATE_PROTOCOL = "emg-stiffness-state/1"
 DEFAULT_PORT = 6731
 SOURCE = "gforce-emg-ui"
+MANUAL_SOURCE = "send_stiffness"  # existing opt-in manual/test command path on the bridge
+EMG, MANUAL, GAINS = "emg", "manual", "gains"
+MANUAL_CONFIRM_MS = 100          # debounce button changes; not classifier evidence
 LEVELS = (0.0, 0.5, 1.0)
 HEARTBEAT, CHANGE, STOP = "heartbeat", "change", "stop"
 KINDS = (HEARTBEAT, CHANGE, STOP)
@@ -227,7 +236,7 @@ def encode_command(*, session: str, seq: int, kind: str, s: Optional[float], sta
                    status: Optional[str] = None, reason: Optional[str] = None,
                    run_id: Optional[str] = None, revision: Optional[int] = None,
                    accepted_pred_id: Optional[int] = None,
-                   last_pred_id: Optional[int] = None) -> bytes:
+                   last_pred_id: Optional[int] = None, source: str = SOURCE) -> bytes:
     """One emg-stiffness/1 datagram (UTF-8 JSON, <= 2048 bytes). s None = no valid command:
     sent as null with valid false, never 0. Every rule of the contract is checked here, so
     a datagram the robot would reject or misread is a ValueError instead."""
@@ -235,6 +244,8 @@ def encode_command(*, session: str, seq: int, kind: str, s: Optional[float], sta
         raise ValueError(f"session must be 8-64 characters [A-Za-z0-9_-], got {session!r}")
     if kind not in KINDS:
         raise ValueError(f"kind must be one of {KINDS}, got {kind!r}")
+    if source not in (SOURCE, MANUAL_SOURCE):
+        raise ValueError(f"unknown command source {source!r}")
     level = None if s is None else _level(s)
     if kind == STOP and level is not None:
         raise ValueError("a 'stop' datagram carries no level (s None)")
@@ -244,7 +255,7 @@ def encode_command(*, session: str, seq: int, kind: str, s: Optional[float], sta
     for name, v in (("sent_wall", sent_wall), ("sent_mono", sent_mono)):
         if not _number(v):
             raise ValueError(f"{name} must be a finite number, got {v!r}")
-    msg = {"proto": PROTOCOL, "source": SOURCE, "session": session, "seq": _whole("seq", seq),
+    msg = {"proto": PROTOCOL, "source": source, "session": session, "seq": _whole("seq", seq),
            "kind": kind, "s": level, "valid": level is not None, "stabilized": stabilized,
            "simulated": simulated, "sent_wall": float(sent_wall), "sent_mono": float(sent_mono)}
     if stab_ms is not None:
@@ -270,6 +281,25 @@ def encode_command(*, session: str, seq: int, kind: str, s: Optional[float], sta
                       allow_nan=False).encode("utf-8")
     if len(data) > MAX_DATAGRAM_BYTES:
         raise ValueError(f"datagram is {len(data)} bytes, limit {MAX_DATAGRAM_BYTES}")
+    return data
+
+
+def encode_gains_command(*, kp_ratio=None, kd_ratio=None, **fields) -> bytes:
+    """Direct commands have a separate protocol; legacy bridges cannot apply them as s."""
+    if fields.get("s") is not None or fields.get("source") != MANUAL_SOURCE:
+        raise ValueError("direct gains require s=None and the manual source")
+    if (kp_ratio is None) != (kd_ratio is None):
+        raise ValueError("both multipliers are required")
+    if kp_ratio is not None:
+        kp_ratio, kd_ratio = validate_pair(kp_ratio, kd_ratio)
+        if fields.get("kind") == STOP:
+            raise ValueError("stop cannot carry gains")
+    msg = json.loads(encode_command(**fields))
+    msg.update(proto=GAINS_PROTOCOL, valid=kp_ratio is not None,
+               kp_ratio=kp_ratio, kd_ratio=kd_ratio)
+    data = json.dumps(msg, separators=(",", ":"), allow_nan=False).encode("utf-8")
+    if len(data) > MAX_DATAGRAM_BYTES:
+        raise ValueError("direct gain datagram too large")
     return data
 
 
@@ -339,6 +369,12 @@ def parse_state(data) -> Optional[dict]:
         if not ok:
             return None
         out[key] = v
+    for key in ("kp_ratio", "kd_ratio"):
+        if key in msg:
+            v = msg[key]
+            if v is not None and (not _number(v) or v < 0):
+                return None
+            out[key] = v
     return out
 
 
@@ -360,8 +396,9 @@ class _Session:
     """One armed period. GUI thread: stop, reason. Sender thread: everything else. Fields
     read by stats() change under RobotOutput._lock."""
 
-    def __init__(self, sid: str, settings: RobotOutputSettings, sock, local, prev):
+    def __init__(self, sid: str, settings: RobotOutputSettings, sock, local, prev, mode=EMG):
         self.id, self.settings, self.sock, self.local = sid, settings, sock, local
+        self.mode = mode                          # immutable for this entire session, incl. stop
         self.addr = (settings.host, settings.port)
         self.prev = prev                          # previous session's thread (its 'stop' first)
         self.stop = threading.Event()
@@ -383,6 +420,7 @@ class RobotOutput:
     engine through snapshot(); it never touches the engine's state or any widget."""
 
     def __init__(self, engine, settings: RobotOutputSettings, *, simulated: bool,
+                 emg_only: bool = False,
                  clock: Callable[[], float] = time.monotonic,
                  wall: Callable[[], float] = time.time,
                  socket_factory: Optional[Callable] = None):
@@ -390,6 +428,7 @@ class RobotOutput:
         if errs:
             raise ValueError("; ".join(errs))
         self.engine = engine
+        self.emg_only = bool(emg_only)
         self.simulated = bool(simulated)          # synthetic EMG: the robot ignores it by default
         self._settings = settings
         self._clock, self._wall = clock, wall
@@ -398,12 +437,84 @@ class RobotOutput:
         self._sess: Optional[_Session] = None
         self._threads: List[threading.Thread] = []
         self._closed = False
+        self._mode = EMG
+        self._manual_level = self._manual_since = None
+        self._manual_gains = self._gains_since = None
         self.sessions = 0
 
     # -- GUI thread ------------------------------------------------------------------
     @property
     def settings(self) -> RobotOutputSettings:
         return self._settings
+
+    @property
+    def mode(self) -> str:
+        with self._lock:
+            return self._mode
+
+    @property
+    def manual_level(self) -> Optional[float]:
+        with self._lock:
+            return self._manual_level
+
+    def set_mode(self, mode: str):
+        """Change source only while disarmed. Selection and mode are never persisted."""
+        if mode not in (EMG, MANUAL, GAINS):
+            raise ValueError(f"unknown output mode {mode!r}")
+        if self.emg_only and mode != EMG:
+            raise ValueError("EMG producer publishes classifier predictions only")
+        with self._lock:
+            if self._sess is not None and not self._sess.stop.is_set():
+                raise RuntimeError("disarm the robot output before changing its source")
+            self._mode = mode
+            self._manual_level = self._manual_since = None
+            self._manual_gains = self._gains_since = None
+
+    @property
+    def manual_gains(self):
+        with self._lock:
+            return self._manual_gains
+
+    def select_gains(self, kp, kd):
+        pair = validate_pair(kp, kd)
+        with self._lock:
+            if self._mode != GAINS:
+                raise RuntimeError("select Manual Kp/Kd mode first")
+            if pair != self._manual_gains:
+                self._manual_gains, self._gains_since = pair, self._clock()
+
+    def _gain_fields(self, now):
+        with self._lock:
+            pair, since = self._manual_gains, self._gains_since
+        age = None if since is None else max(0.0, (now - since) * 1000)
+        ready = pair is not None and age is not None and age >= MANUAL_CONFIRM_MS
+        kp, kd = pair if ready else (None, None)
+        return {"s": None, "kp_ratio": kp, "kd_ratio": kd, "stabilized": True,
+                "stab_ms": dict.fromkeys(("up", "down", "startup"), MANUAL_CONFIRM_MS),
+                "age_ms": age, "status": "manual_gains" if ready else "manual_waiting",
+                "reason": "operator-selected multipliers; classifier off" if ready
+                else "waiting for a gain pair held for 100 ms"}
+
+    def select_manual(self, level: float):
+        """Select a level, even during sending; the bridge still controls when it applies."""
+        level = _level(level)
+        with self._lock:
+            if self._mode != MANUAL:
+                raise RuntimeError("select Manual mode first")
+            if level != self._manual_level:
+                self._manual_level, self._manual_since = level, self._clock()
+
+    def _manual_fields(self, now: float) -> dict:
+        with self._lock:
+            level, since = self._manual_level, self._manual_since
+        age = None if since is None else max(0.0, (now - since) * 1000)
+        ready = age is not None and age >= MANUAL_CONFIRM_MS
+        return {"s": level if ready else None,
+                "stabilized": True, "stab_ms": dict.fromkeys(
+                    ("up", "down", "startup"), MANUAL_CONFIRM_MS),
+                "age_ms": age, "status": "manual_selected" if ready else "manual_waiting",
+                "reason": "operator-selected level; classifier off" if ready
+                else "waiting for a manual selection held for 100 ms"}
 
     @property
     def armed(self) -> bool:
@@ -441,11 +552,15 @@ class RobotOutput:
                 raise RuntimeError("robot output is closed")
             if self._sess is not None and not self._sess.stop.is_set():
                 return self._sess.id
+            if self._mode == MANUAL and self._manual_level is None:
+                raise RuntimeError("select a manual stiffness level before sending")
+            if self._mode == GAINS and self._manual_gains is None:
+                raise RuntimeError("apply a Kp/Kd pair before sending")
             cfg = self._settings
             sock, local = self._open(cfg)
             alive = [t for t in self._threads if t.is_alive()]
             sess = _Session(uuid.uuid4().hex[:12], cfg, sock, local,
-                            alive[-1] if alive else None)
+                            alive[-1] if alive else None, self._mode)
             t = threading.Thread(target=self._run, args=(sess,), name=THREAD_NAME, daemon=True)
             try:
                 t.start()
@@ -556,30 +671,44 @@ class RobotOutput:
         """(bytes, kind, (s, stabilized)) from a fresh snapshot, or None (error counted)."""
         now = self._clock()
         try:
-            f = command_fields(self.engine.snapshot(), now)
+            f = (self._gain_fields(now) if sess.mode == GAINS else
+                 self._manual_fields(now) if sess.mode == MANUAL
+                 else command_fields(self.engine.snapshot(), now))
         except Exception as e:
             self._error(sess, "snapshot", e, trace=True)
             if not stop:
                 return None
             f = {"s": None, "stabilized": False}
+        # A manual selection is an explicit operator command, independent of EMG/simulator.
+        source = SOURCE if sess.mode == EMG else MANUAL_SOURCE
+        f["source"] = source
+        simulated = self.simulated if sess.mode == EMG else False
+        encoder = encode_gains_command if sess.mode == GAINS else encode_command
         if stop:
             f.update(s=None, accepted_pred_id=None, reason=sess.reason or "disarmed")
+            if sess.mode == GAINS:
+                f.update(kp_ratio=None, kd_ratio=None)
             kind = STOP
         else:
-            kind = CHANGE if (f["s"], f["stabilized"]) != sess.last else HEARTBEAT
+            kind = HEARTBEAT
+        key = (f["s"], f["stabilized"])
+        if sess.mode == GAINS:
+            key += (f.get("kp_ratio"), f.get("kd_ratio"))
+        if not stop and key != sess.last:
+            kind = CHANGE
         try:
-            data = encode_command(session=sess.id, seq=sess.seq, kind=kind,
-                                  simulated=self.simulated, sent_wall=self._wall(),
+            data = encoder(session=sess.id, seq=sess.seq, kind=kind,
+                                  simulated=simulated, sent_wall=self._wall(),
                                   sent_mono=self._clock(), **f)
         except ValueError as e:
             self._error(sess, "encode", e, trace=True)
             if not stop:
                 return None
             f = {"s": None, "stabilized": False, "reason": f["reason"]}   # always encodable
-            data = encode_command(session=sess.id, seq=sess.seq, kind=STOP,
-                                  simulated=self.simulated, sent_wall=self._wall(),
+            data = encoder(session=sess.id, seq=sess.seq, kind=STOP,
+                                  source=source, simulated=simulated, sent_wall=self._wall(),
                                   sent_mono=self._clock(), **f)
-        return data, kind, (f["s"], f["stabilized"])
+        return data, kind, key
 
     def _send(self, sess: _Session, data: bytes, kind: str, key) -> bool:
         try:

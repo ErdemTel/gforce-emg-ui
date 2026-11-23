@@ -4,6 +4,88 @@ Low-latency UI for recording and visualizing the **8-channel EMG** (+ 6-axis IMU
 OYMotion **gForceUltra** armband, built on the [`sensor-sdk`](https://pypi.org/project/sensor-sdk/)
 Python package, PyQt5 and pyqtgraph.
 
+## Current Sharpa workflow: one GUI, Manual or EMG
+
+On the dual-arm PC, start the robot backend in one terminal:
+
+```bash
+~/ws_fanuc/src/dual_sharpa_wave_ros2/script/start_compliance.sh --hand right --mode hardware
+```
+
+Then open this existing GUI in a second terminal:
+
+```bash
+~/erdem/emg-sharpa-stiffness/gforce-emg-ui/start_gui.sh
+```
+
+The backend opens no window. This app opens its **Robot control** tab with
+**Manual / EMG** selection, Kp/Kd editing, Start/Pause, reset to 1/1 and verified
+device status. Manual works without a band, model, or EMG SDK initialization.
+Scan/Connect initializes the band only when requested. An EMG connection or
+classifier failure does not prevent manual robot control.
+
+In Manual, enter gains → Apply gains → Start control. Requested gains and
+**Last verified device gains** are separate; the display remains available while
+paused. Start reads identity/gains before enabling updates. For a stationary
+unloaded compliance test, explicitly use Hold current pose. Release that local
+publisher before starting teleoperation.
+
+**Return full robot home** pauses updates and releases this GUI's pose hold, then
+moves **both FANUC arms to the configured lab home pose, followed by both Sharpa
+hands to zero**, regardless of the hand selected for EMG. Current hand gains are
+preserved; positive Kd is required on every joint. Exit teleop, close other motion
+or gain senders, and clear the whole path first. This is joint interpolation, with
+no collision planning. Both arm controller sets must be active, the force limiter
+must be ARMED, and both hand drivers/feedback must be available. It refuses to
+fall back to a partial return if components are missing.
+
+The GUI reports HOMING, the current stage, and completion/failure. **Cancel return
+home** stops new arm targets and cancels hand recovery; the last arm target is
+retained, so cancellation is not an emergency stop. Updates remain paused and
+pose hold remains off afterward. Restart the updated coordinator and GUI to load
+this feature; the button stays disabled with an older backend or in Preview.
+
+The current backend presets are Low (0): **0.15 / 0.30**, Medium (0.5):
+**0.40 / 0.60**, High (1): **1 / 1** (Kp / Kd multipliers). The GUI displays the
+loaded backend mapping; restart the coordinator after a preset configuration edit.
+These development settings are separate from driver startup gains (0.6 / 0.8).
+
+Intentional EMG level reversals no longer latch the current backend configuration.
+Stable input, active pose hold/teleop and gain-write rate limits still apply.
+The current EMG configuration allows a two-write burst and replenishes one write
+every 2 seconds. A level must persist for 1 second, and the controller waits
+1.5 seconds after each completed transition. Actual updates can take longer than
+2 seconds because the driver must finish its write and readback first.
+Last verified gains change only after device readback confirms an applied pair;
+see Pending / blocked reason when the requested level has not yet been applied.
+
+For EMG, connect the band and use the existing Live Classifier tab: load a trusted
+model, review compatibility, enable stabilization and apply its settings, and
+start classification. Select EMG in Robot control (Start if paused). The same app
+manages prediction sending; there is no separate Send checkbox or second window.
+Selecting Manual drains pending operations and selects 1/1; a paused session needs
+Start. Acquisition, recording, collection, training/model workflows, prediction
+logs and stabilization remain available.
+
+The usual `python -m gforce_emg_ui` entrypoint opens these integrated controls.
+`--robot-control HOST:PORT` selects the local coordinator; existing `--robot-udp`
+also sets this target. Default is 127.0.0.1:6731 and right hand (serial
+`C956943BC957`). For the left hand, pass `--hand left` to both the backend and GUI.
+The GUI refuses state from the other hand. Fake sessions use backend `--hand right --mode fake` and GUI
+`start_gui.sh --robot-control 127.0.0.1:6732`; no band or simulator is needed for
+manual tests.
+
+The coordinator and SDK ownership remain in shared `ws_fanuc`; the GUI imports
+neither ROS nor Sharpa's SDK. Robot control and existing EMG packets share one
+localhost UDP receiver. The authoritative operator guide is
+`~/ws_fanuc/src/dual_sharpa_wave_ros2/docs/compliance_control.md`.
+
+Compatibility modes remain explicit: `--legacy-robot-output` opens the previous
+bridge controls; `--emg-producer` opens prediction-only controls. Neither is the
+normal workflow. Do not run the old bridge alongside the new coordinator.
+Current three gain pairs are development settings, not calibrated stiffness;
+SDK write limits/faults still require hardware validation.
+
 ## Setup
 
 Requires Python ≥ 3.10 (3.12–3.14 for the Live Classifier) and git. `sensor-sdk` ships wheels for **Linux x86_64/arm64,
@@ -435,25 +517,30 @@ real human EMG.
 
 ### Robot output (Sharpa stiffness)
 
+**Legacy integrated bridge workflow.** For current operation use the one-GUI workflow above.
+The controls in this section are available explicitly with `--legacy-robot-output`.
+
 Optional, and off at every start (the armed state is never stored). While armed, a sender
 thread (`live/robot_out.py`, `live-robot-out`) streams the value this tab shows (the
-stabilized command, or the raw output while stabilization is OFF) as UDP datagrams to the
+stabilized command, raw output while stabilization is OFF, or manual selection) as UDP datagrams to the
 robot bridge `emg_stiffness_bridge` of the parent repository
 (`ros_ws/src/emg_stiffness_bridge`), which may turn it into Sharpa Wave MIT gains. This app
-only sends: no ROS, no driver, no gain values; the bridge decides what the hand does.
+has no ROS or driver dependency; the bridge decides what the hand does. The separate
+**Stiffness gains** section can configure the bridge's level multipliers while disarmed.
 
-Enable:
+Enable EMG output (the default **Stiffness source → EMG classifier**):
 
-1. Robot PC: start the bridge for one hand and arm it there (it starts disarmed and in dry
+1. Robot PC: start the bridge for one hand (it starts disarmed and in dry
    run; see its README and `docs/deployment.md` in the parent repository).
 2. Here: connect the band → *Load model…* → *Start* → *Output stabilization*: *Enable
    stabilization*, every confirmation ≥ 100 ms → *Apply settings*.
 3. *Robot output (UDP)*: *Robot IP* / *UDP port* of the bridge → tick *Send to robot* →
    confirm the target in the dialog. The status bar shows **ROBOT OUTPUT ARMED → ip:port**
-   on every tab until it is disarmed.
+   on every tab until it is disarmed. Then arm the controller on the robot PC: a new UI
+   session disarms an already-armed bridge.
 4. Untick *Send to robot* to stop (the last datagram is a `stop`).
 
-*Send to robot* is enabled only with a model, the band streaming, the classifier running, a
+In EMG mode, *Send to robot* is enabled only with a model, the band streaming, the classifier running, a
 valid target, and a Compatibility check without warn / unknown items on a real band.
 Warnings, unknowns or the simulator need the extra tick *Send despite the warnings /
 simulator* (the Start acknowledgement does not count); it is cleared whenever the check
@@ -461,7 +548,7 @@ changes. Incompatible settings cannot be overridden. The box lists what is missi
 what the bridge will ignore with its defaults (*robot will ignore: stabilization OFF*,
 *robot will ignore: simulated*).
 
-Disarms by itself (the sender's last datagram is `stop`; re-arm by hand): model load or
+In EMG mode it disarms by itself (the sender's last datagram is `stop`; re-arm by hand): model load or
 replacement, *Apply settings* (also switching stabilization off: the robot never gets a new
 meaning of s without a new arm), *Stop* or the run stopping by itself, the band leaving
 *streaming* (disconnect, link lost / reconnecting, failed), closing the app.
@@ -475,6 +562,101 @@ meaning of s without a new arm), *Stop* or the run stopping by itself, the band 
 The target persists per user (`robot_output/settings` in `live-classifier.ini`) when you
 arm or finish editing a valid one. `--robot-udp HOST:PORT` prefills it for one session and
 never arms.
+
+**Manual stiffness (no band or model):** in *Live Classifier → Stiffness source*, select
+**Manual (classifier off)**. This stops the classifier and any outgoing stream. Select
+**0 · Low**, **0.5 · Medium**, or **1 · High**, then tick **Send to robot** and confirm the
+target. Arm the bridge after starting the UI stream. While sending, clicking another level
+requests that level through the same bridge and gain table. The large value shows the
+**selection**; the Robot output status shows the robot's **applied s** from readback.
+
+The bridge must be launched with **`accept_test_sender:=true`** for manual output.
+Manual commands use the existing `source: send_stiffness` path with `simulated: false`,
+even if the app was opened with `--simulate`: these are explicit operator commands, not
+synthetic EMG. The confirmation dialog explains this. Default `dry_run: true`, robot-side
+arming, active-command gating, write budgets, dwell times and fault checks still apply.
+No need to disable stabilization checks: a new manual selection is debounced for **100 ms**
+(`stabilized: true`, `stab_ms: 100/100/100`), with `s: null` while waiting. This describes
+button confirmation, not model evidence; manual packets have no prediction or run IDs.
+Bridge configurations requiring a confirmation longer than 100 ms will reject these commands.
+
+Uncheck **Send to robot** to stop output, or change the source selector. Neither action
+disables motors or restores different gains: the bridge holds the last applied gains.
+Switching sources stops sending, clears the manual selection, and leaves the classifier
+stopped. Returning to EMG requires **Start**, **Send to robot**, then robot-side arming.
+Manual mode continues independently of EMG disconnects. Closing the app sends `stop`.
+Mode, selected level and sending state are never restored on app restart.
+
+**Manual Kp/Kd (live tuning):** choose the third *Stiffness source* option,
+**Manual Kp/Kd (classifier off)**. No band or model is needed. The two controls multiply
+each joint's baseline gain: `Kp_i = BASE_KP_i × Kp multiplier`, and likewise for Kd.
+They do not modify the three presets. For example, **0.55 / 0.75** requests 55% of each
+joint's baseline Kp and 75% of its baseline Kd.
+
+1. Enter both multipliers and click **Apply gains** to select the pair locally.
+2. Enable **Send to robot**, confirm the target, then arm the bridge.
+3. During sending/teleop, edit the fields and click **Apply gains** again. Editing alone
+   leaves the previously selected pair streaming. No stop or re-arm is needed per edit.
+4. Check **robot: applied Kp / Kd** for readback. The large pair is the selected command;
+   the fields are a draft. In dry run the applied pair stays at the actual device gains.
+
+Both multipliers independently accept **0–1 inclusive**, with four decimal places in
+the fields. Typing updates only the draft and enables **Apply gains** without needing
+to press Enter or leave the field first. A click sends the complete pair while
+**Send to robot** stays checked; the previous pair continues streaming until that click.
+Empty/incomplete drafts disable Apply. The bridge independently rejects non-finite or
+out-of-range pairs. The separate three-level preset editor retains its bounds and
+damping-ratio constraints. Commands
+use `emg-gains/1`, `source: send_stiffness`, and the same 100 ms debounce, command lease,
+arming, persistence, rate limits, write budget and fault checks. Crossing the medium Kp
+multiplier passes through the medium preset first. Repeated heartbeats do not rewrite gains.
+Arbitrary pairs have no low/medium/high tone; use the applied multipliers as confirmation.
+
+**Zero is an actual gain:** Kp=0 removes the position-stiffness term and Kd=0 removes the
+damping term; neither turns off the motors. Restore positive Kd before using the shared
+driver's default-pose recovery, which refuses zero damping. These wider pairs have not
+been validated on hardware by the software tests.
+
+**Without teleop:** start the bridge with `allow_manual_gains_when_idle:=true` in addition
+to `hand:=right dry_run:=false accept_test_sender:=true` and the session's feedback-gap
+setting. Leave the hand driver running, select Manual Kp/Kd, Apply the initial pair,
+enable Send and arm the bridge. Further Apply clicks work without Quest or a pose-holding
+GUI. Feedback may correctly show `teleop_active=false`; check applied Kp/Kd for success.
+This changes gains only and does not send joint positions; the hand retains its existing
+motor target. Changing gains can therefore change its physical pose. Fresh feedback,
+normal driver state and other bridge/driver checks remain required. The option defaults
+to false; it does not exempt EMG or manual 0/0.5/1 commands from the position-stream check.
+
+Build and restart the updated bridge and restart this GUI before using this mode. Older
+bridges reject `emg-gains/1`. The existing **Stiffness gains** preset editor still requires
+Send off and a disarmed bridge. Mode and selected pair are never restored at startup.
+
+**Stiffness gains:** six multiplier controls map levels 0, 0.5 and 1 to Kp/Kd scales.
+Initial pairs are **0.40/0.65**, **0.60/0.80**, and **1.00/1.00**. Each scale multiplies
+the hand's joint-specific baseline array; these are not identical absolute gains for all
+22 joints.
+
+1. Start the updated bridge for the selected hand. Keep *Send to robot* off and disarm the
+   bridge using the robot-side controls.
+2. In *Stiffness gains*, select the hand and click **Read bridge**. The panel displays the
+   actual active table and whether the bridge is armed. Reading does not overwrite a draft.
+3. Edit the six values, or use **Use bridge values** / **Defaults** to fill the draft.
+4. Click **Apply table**. Wait for the bridge's confirmation. This updates the mapping and
+   configuration hash without writing gains to the device. After re-arming, future level
+   commands use the new mapping.
+
+Invalid ranges, decreasing levels, duplicate gain pairs and incompatible damping ratios
+are rejected locally and by the bridge. Edits cannot be applied while output is sending,
+the bridge is armed/arming, a write/monitor operation is pending, or hand recovery is active.
+A stale configuration is rejected; read it again before applying. Applying never clears a
+fault latch, resets a write budget, enables sending or arms the bridge.
+
+Drafts persist under `stiffness_gains/draft` in the per-user settings. A bridge restart
+reloads its launch/YAML configuration: read and reapply the saved draft, or edit the robot's
+startup YAML to retain it there. The GUI displays active bridge values separately from the
+draft and refreshes them every three seconds after the first read. Before that read, the
+panel sends nothing. Configuration uses a separate `emg-stiffness-config/1` exchange on
+the same robot IP/UDP port; it does not interrupt the stiffness-command lease.
 
 Protocol `emg-stiffness/1` (normative: `docs/design_emg_stiffness_2026-11-02.md` §5.1–5.2
 and `docs/protocol/emg-stiffness-v1-golden.json` in the parent repository; an identical copy
