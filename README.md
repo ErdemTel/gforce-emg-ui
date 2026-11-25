@@ -218,7 +218,7 @@ folder (simulation: `<folder>/simulated/`). `trial.json`: 0 = `low` (s 0.0), 1 =
 participant / session = parent / folder name; trial IDs m001, m002, …
 
 **Protocol** (durations editable under *Protocol & plan settings*, saved per trial):
-PREPARE 5 s → SETTLE 3 s → **HOLD 5 s** (only training candidate) → REST 15 s, then stop,
+PREPARE 5 s → SETTLE 3 s → **HOLD 10 s** (only training candidate) → REST 3 s, then stop,
 save and review. *Extend rest* adds 15 s; *Abort* instead of pausing. Next trial starts
 only when you click Start.
 

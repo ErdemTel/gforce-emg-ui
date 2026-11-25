@@ -71,7 +71,7 @@ def test_moving_trials_move_in_settle_and_hold_while_keeping_the_effort(motion, 
 
 def test_phase_durations_do_not_depend_on_motion():
     s = ProtocolSettings()
-    assert (s.prepare_s, s.settle_s, s.hold_s, s.rest_s) == (5.0, 3.0, 5.0, 15.0)
+    assert (s.prepare_s, s.settle_s, s.hold_s, s.rest_s) == (5.0, 3.0, 10.0, 3.0)
 
 
 # -- plan coverage ---------------------------------------------------------------
