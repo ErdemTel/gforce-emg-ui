@@ -1,7 +1,8 @@
 """Live Classifier with a channel-subset, two-class model (low / high, no ch6).
 
-Real-model tests use emg-stiffness-data runs/mlp_s21_7ch_binary_seed42_001 and its
-training trials in data/S2.1 (skipped when not available).
+Real-model tests use emg-stiffness-data runs/mlp_s21_7ch_binary_seed42_001 (30 training
+windows per trial) and runs/mlp_s21_7ch_binary_155w_seed42_001 (155) with their training
+trials in data/S2.1 (skipped when not available).
 """
 
 import json
@@ -23,6 +24,11 @@ BINARY = Path(os.environ.get(
 BINARY_DATA = Path(os.environ.get("GFORCE_LIVE_BINARY_DATA",
                                   REPO.parent / "emg-stiffness-data/data/S2.1"))
 BINARY_SHA256 = "1e54356b45d4248828c2eb467c483ddbe8927a8bd5d4d2f34d0d4b08ac03435c"
+# name -> (model.joblib, sha256, training windows); the 155-window model uses the whole HOLD core
+BINARY_MODELS = {
+    "30w": (BINARY, BINARY_SHA256, 600),
+    "155w": (BINARY.parents[1] / "mlp_s21_7ch_binary_155w_seed42_001/model.joblib",
+             "359c91d5679624f96f8f865fd263b0726efb244395d75d83b93d814b7ebbef90", 3100)}
 KEEP = ("ch1", "ch2", "ch3", "ch4", "ch5", "ch7", "ch8")
 BINARY_CLASSES = ((0, "low", 0.0), (2, "high", 1.0))
 
@@ -31,23 +37,31 @@ needs_binary = pytest.mark.skipif(not (classifier_status()[0] and BINARY.is_file
 needs_binary_data = pytest.mark.skipif(not BINARY_DATA.is_dir(), reason="S2.1 not available")
 
 
+@pytest.fixture(scope="module", params=list(BINARY_MODELS))
+def binary_case(request):
+    """(loaded model, expected sha256, expected training windows)."""
+    path, sha, n_windows = BINARY_MODELS[request.param]
+    if not (classifier_status()[0] and path.is_file()):
+        pytest.skip(f"emg-classifier or {path.parent.name} not available")
+    return load_trusted_model(path), sha, n_windows
+
+
 @pytest.fixture(scope="module")
-def binary():
-    return load_trusted_model(BINARY)
+def binary(binary_case):
+    return binary_case[0]
 
 
-@needs_binary
-def test_binary_artifact_is_accepted(binary):
-    assert binary.sha256 == BINARY_SHA256 and binary.name == "short_window_mlp"
+def test_binary_artifact_is_accepted(binary_case):
+    binary, sha, n_windows = binary_case
+    assert binary.sha256 == sha and binary.name == "short_window_mlp"
     assert binary.channel_names == KEEP and binary.classes == BINARY_CLASSES
     assert (binary.window_samples, binary.hop_samples) == (100, 25)
     assert list(binary.clf.pipeline.classes_) == [0, 2]
-    assert binary.training["n_trials"] == 20 and binary.training["n_windows"] == 600
+    assert binary.training["n_trials"] == 20 and binary.training["n_windows"] == n_windows
     assert binary.code_sha256 == binary.installed_code_sha256 == INSTALLED_CODE_SHA256
     assert binary.warnings == ()
 
 
-@needs_binary
 @needs_binary_data
 def test_binary_live_adapter_matches_offline_api(binary):
     """8-channel live blocks -> the engine's 7 model channels -> same windows, features and

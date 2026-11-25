@@ -436,10 +436,12 @@ files the real-model tests pin (sha256, trial counts): do not point the test var
 below at the 77-trial model.
 
 Two-class model (low / high only, ch6 left out: poor contact in S2.1):
-`../emg-stiffness-data/runs/mlp_s21_7ch_binary_seed42_001/model.joblib` (`train-subset`,
-20 S2.1 trials / 600 windows; development CV 20/20 trials, window BA 0.994; leave-one-block-out
-20/20). The engine feeds only the model's channels; bars, history ticks and the soft score
-follow the model's classes (no medium). Needs a classifier wheel with channel / class subsets.
+`../emg-stiffness-data/runs/mlp_s21_7ch_binary_155w_seed42_001/model.joblib` (`train-subset`,
+20 S2.1 trials, 155 windows each = the whole trimmed 10 s HOLD, 3100 windows; development CV
+20/20 trials, window BA 0.993; leave-one-block-out 20/20, 0.987). The 30-window
+`mlp_s21_7ch_binary_seed42_001` scores the same. The engine feeds only the model's channels;
+bars, history ticks and the soft score follow the model's classes (no medium). Needs a
+classifier wheel with channel / class subsets.
 
 Use: connect the band → **Live Classifier** → *Load model…* (a trusted local
 `model.joblib`; joblib/pickle runs code, nothing loads automatically) → review
