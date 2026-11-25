@@ -1,7 +1,7 @@
 """Trial protocol for stiffness-command data collection (Qt-free).
 
 One instructed effort level per trial. Phases (default durations):
-  PREPARE 5 s -> SETTLE 3 s -> HOLD 5 s -> REST 15 s   (28 s recorded)
+  PREPARE 5 s -> SETTLE 3 s -> HOLD 10 s -> REST 3 s   (21 s recorded)
 Only HOLD is a training-candidate interval. Phase and target are separate:
 a REST interval is never "low", whatever the trial's target. Each trial also has
 one motion condition; in moving trials the movement starts in SETTLE and continues
@@ -259,8 +259,8 @@ def task_instructions(target: str, motion: str = STATIONARY, task: str = GRASP) 
 class ProtocolSettings:
     prepare_s: float = 5.0
     settle_s: float = 3.0
-    hold_s: float = 5.0
-    rest_s: float = 15.0
+    hold_s: float = 10.0
+    rest_s: float = 3.0
     rest_extension_s: float = 15.0      # per "Extend rest" click
     readiness_s: float = 3.0            # readiness must hold this long before Start
     emg_freshness_s: float = 0.5        # max age of the newest received EMG batch (software

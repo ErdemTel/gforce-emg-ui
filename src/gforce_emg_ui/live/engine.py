@@ -6,6 +6,11 @@
   latest-result snapshot   <- read by the GUI refresh (no per-result Qt events)
   watchdog thread          -> expires output when input or the prediction is stale
 
+Each published result also goes, in order and on the worker, through the output
+stabilizer (live.stabilization). Raw results are never changed: the snapshot carries the
+raw result and the stabilizer state separately, and every reset path below also clears
+the stabilizer.
+
 N and H come from the loaded model (sample counts, never milliseconds). Only the 8 EMG
 values enter windows; indices, masks, receipt times and stream/segment IDs are used for
 validity and diagnostics only. Inbox overflow drops the OLDEST blocks (counted); the
@@ -16,6 +21,7 @@ queued work and results from an older generation are discarded.
 """
 
 import collections
+import json
 import threading
 import time
 import traceback
@@ -26,6 +32,8 @@ from typing import Any, Callable, List, NamedTuple, Optional, Tuple
 import numpy as np
 
 from ..config import EMG_CHANNELS
+from .stabilization import (ALGORITHM, ALGORITHM_VERSION, SETTINGS_SCHEMA, TIMING_NOTE,
+                            Stabilizer, StabilizerSettings, StabilizerState, observation)
 
 HUB_CHANNELS = tuple(f"ch{i + 1}" for i in range(EMG_CHANNELS))   # EmgBlock.data row order
 
@@ -82,13 +90,23 @@ class LiveSnapshot:
     stale_s: float
     last_input_mono: Optional[float]
     counters: dict
+    stabilization: Optional[StabilizerState] = None
 
     def current(self, now: float) -> Optional[LiveResult]:
-        """The result to show as s, or None (shown as s = --). Freshness rechecked here."""
+        """The raw result to show as s, or None (shown as s = --). Freshness rechecked here."""
         r = self.result
         if self.state != RUNNING or r is None or not r.valid or r.age(now) > self.stale_s:
             return None
         return r
+
+    def stable(self, now: float) -> Optional[StabilizerState]:
+        """The stabilizer state if it has an accepted class to show, else None (s = --).
+        Same freshness rule as current(): newest processed evidence <= stale_s old."""
+        st = self.stabilization
+        if (self.state != RUNNING or st is None or st.accepted is None
+                or st.last_evidence_mono is None or now - st.last_evidence_mono > self.stale_s):
+            return None
+        return st
 
 
 class _Item(NamedTuple):
@@ -158,10 +176,15 @@ class LiveEngine:
         self._counts = collections.Counter()
         self._resets = collections.Counter()
         self._history: collections.deque = collections.deque(maxlen=self.settings.history)
+        self._stab = Stabilizer()
+        self._stab_rows: list = []                 # log rows, written outside _lock
+        self._stab_history: collections.deque = collections.deque(maxlen=self.settings.history)
+        self._marks: collections.deque = collections.deque(maxlen=100)    # (t, kind)
         n = self.settings.timing_samples
         self._t_infer = collections.deque(maxlen=n)        # ms per batch call
         self._t_infer_win = collections.deque(maxlen=n)    # ms per window
         self._t_ready = collections.deque(maxlen=n)        # newest receipt -> result ms
+        self._t_stab = collections.deque(maxlen=n)         # ms per stabilizer update
         # source thread (under _cv)
         self._seq = 0
         self._inbox_n = 0                          # samples queued in the inbox
@@ -198,6 +221,8 @@ class LiveEngine:
             self._model, self._order = model, order
             self._gen += 1
             self._result = None
+            self._stab_reset_locked("model_replaced", self._clock())
+            self._stab_rows.clear()                # no log is open here
             self._set_state(READY if model is not None else NO_MODEL, "")
 
     def start(self, run_meta: Optional[dict] = None, log=None,
@@ -218,6 +243,10 @@ class LiveEngine:
             self._resets.clear()
             self._warm = (0, self._model.window_samples)
             self._gap_locked(self._started_mono)
+            self._stab_rows.clear()
+            self._stab_reset_locked("start", self._started_mono, new_run=True)
+            self._stab_rows.append(self._stab.settings_row(self._started_mono, self._run_id,
+                                                           self._gen))
             self._set_state(WARMING_UP, "collecting the first window")
             with self._cv:
                 self._inbox.clear()
@@ -226,11 +255,14 @@ class LiveEngine:
                 self._dropped_blocks = self._dropped_samples = 0
             self._accepting = True
             run_id, gen = self._run_id, self._gen
+            rows = self._take_stab_rows()
         self._ensure_threads()
         if not self._subscribed:
             self.hub.subscribe_emg(self._fn, name=self.SUB_NAME)
             self._subscribed = True
         self._event("start", f"generation {gen}")
+        self._event("stabilization_settings", self._settings_detail())
+        self._put_stab(log, rows)
         return run_id
 
     def stop(self, reason: str = "user_stop"):
@@ -238,10 +270,12 @@ class LiveEngine:
         with self._lock:
             was = self._accepting
             self._stop_locked(reason)
+            rows, log = self._take_stab_rows(), self._log
         if self._subscribed:
             self.hub.unsubscribe_emg(self._fn)
             self._subscribed = False
         if was:
+            self._put_stab(log, rows)
             self._close_log(reason)
 
     def reset(self, reason: str = "user_reset"):
@@ -252,9 +286,65 @@ class LiveEngine:
             self._gen += 1
             self._resets[reason] += 1
             self._result = None
-            self._gap_locked(self._clock())
+            now = self._clock()
+            self._gap_locked(now)
+            self._stab_reset_locked(reason, now)
             self._set_state(WARMING_UP, reason)
+            rows, log = self._take_stab_rows(), self._log
         self._event("reset", reason)
+        self._put_stab(log, rows)
+
+    # -- output stabilization (GUI thread) -----------------------------------------
+    @property
+    def stabilizer_settings(self) -> StabilizerSettings:
+        return self._stab.settings
+
+    @property
+    def stabilizer_revision(self) -> int:
+        return self._stab.revision
+
+    def set_stabilization(self, settings: StabilizerSettings) -> int:
+        """Apply a complete configuration atomically (classification keeps running).
+        New revision, state cleared, history break; results whose evidence was received
+        before this call are never used. Returns the revision. ValueError if invalid."""
+        errors = settings.errors(self.settings.stale_s * 1000)
+        if errors:
+            raise ValueError("; ".join(errors))
+        with self._lock:
+            now = self._clock()
+            row = self._stab.configure(settings, now, self._run_id, self._gen)
+            self._stab_mark_locked(now, "settings")
+            self._version += 1
+            rev, log = self._stab.revision, self._log
+        self._put_stab(log, [row])
+        self._event("stabilization_settings", self._settings_detail())
+        return rev
+
+    def reset_stabilization(self, reason: str = "user_stabilization_reset"):
+        """Clear the stabilizer only (raw output and buffer continue)."""
+        with self._lock:
+            now = self._clock()
+            self._stab_reset_locked(reason, now, boundary=True)
+            self._version += 1
+            rows, log = self._take_stab_rows(), self._log
+        self._put_stab(log, rows)
+        self._event("stabilization_reset", reason)
+
+    def stabilization_info(self) -> dict:
+        """JSON-able description for run metadata."""
+        with self._lock:
+            st = self._stab
+            return {"algorithm": ALGORITHM, "algorithm_version": ALGORITHM_VERSION,
+                    "settings_schema": SETTINGS_SCHEMA, "revision": st.revision,
+                    "settings": st.settings.to_dict(), "timing": TIMING_NOTE,
+                    "log": "stabilization.csv (raw predictions stay in predictions.csv)"}
+
+    def stabilized_history(self):
+        """((k, 2) rows of (newest receipt mono, accepted s or NaN), (m,) mark times)."""
+        with self._lock:
+            h = np.array(self._stab_history, dtype=float).reshape(-1, 2)
+            marks = np.array([t for t, _ in self._marks], dtype=float)
+        return h, marks
 
     def snapshot(self) -> LiveSnapshot:
         with self._cv:
@@ -266,7 +356,7 @@ class LiveEngine:
                             resets=dict(self._resets), predictions=self._pred_id)
             return LiveSnapshot(self._version, self._state, self._reason, self._result,
                                 self._run_id, self._gen, self._warm, self.settings.stale_s,
-                                last_in, counters)
+                                last_in, counters, self._stab.state())
 
     def history(self) -> np.ndarray:
         """(k, 3) rows of (newest receipt mono, s_discrete, s_expected); NaN rows = gaps."""
@@ -278,15 +368,20 @@ class LiveEngine:
         with self._lock:
             sets = {"inference_batch_ms": list(self._t_infer),
                     "inference_window_ms": list(self._t_infer_win),
-                    "receipt_to_result_ms": list(self._t_ready)}
+                    "receipt_to_result_ms": list(self._t_ready),
+                    "stabilization_ms": list(self._t_stab)}
         return {k: {"p50": _pct(v, 50), "p95": _pct(v, 95), "n": len(v)}
                 for k, v in sets.items()}
 
-    def log_display(self, pred_id: int, gui_mono: float, receipt_to_gui_ms: float):
+    def log_display(self, pred_id: int, gui_mono: float, receipt_to_gui_ms: float,
+                    main_output: str = "raw", revision: Optional[int] = None,
+                    shown_label: Optional[str] = None):
         log = self._log
         if log is not None:
             log.put_display({"pred_id": pred_id, "gui_applied_mono": gui_mono,
-                             "receipt_to_gui_ms": receipt_to_gui_ms})
+                             "receipt_to_gui_ms": receipt_to_gui_ms,
+                             "main_output": main_output, "revision": revision,
+                             "shown_label": shown_label})
 
     def shutdown(self, timeout: float = 0.5):
         """Stop, then let the threads exit (bounded joins; they are daemons)."""
@@ -332,9 +427,12 @@ class LiveEngine:
                 self._result = None
                 self._counts["stale_events"] += 1
                 self._gap_locked(now)
+                self._stab_reset_locked("stale", now)
                 self._set_state(STALE, event)
+            rows, log = self._take_stab_rows(), self._log
         if event:
             self._event("stale", event)
+            self._put_stab(log, rows)
 
     # -- source thread -----------------------------------------------------------
     def _on_emg(self, block):
@@ -402,6 +500,8 @@ class LiveEngine:
                 with self._lock:
                     self._counts["errors"] += 1
                     self._stop_locked(f"{type(e).__name__}: {e}", state=ERROR)
+                    rows, log = self._take_stab_rows(), self._log
+                self._put_stab(log, rows)
                 self._close_log("error")
 
     def _w_reset(self):
@@ -564,6 +664,7 @@ class LiveEngine:
                         log_events.append(("reset", f"{reason} {detail}".strip()))
                     self._result = None
                     self._gap_locked(now)
+                    self._stab_reset_locked(reason, now)
                     self._set_state(INVALID_INPUT if reason in INVALID_REASONS else WARMING_UP,
                                     f"{reason}: {detail}" if detail else reason)
                 elif ev[0] == "fatal":
@@ -573,6 +674,8 @@ class LiveEngine:
                 else:
                     k = ev[1]
                     if k not in preds:
+                        self._stab_rows.append(self._stab.break_evidence(
+                            "skipped_stale_window", now, self._run_id, gen))
                         continue
                     w, p = windows[k], preds[k]
                     self._pred_id += 1
@@ -583,9 +686,12 @@ class LiveEngine:
                     rows.append((r, fresh))
                     if not fresh:
                         c["expired_before_publish"] += 1
+                        self._stab_rows.append(self._stab.break_evidence(
+                            "expired_before_publish", now, self._run_id, gen))
                         continue
                     self._t_ready.append(r.age(now) * 1000)
                     self._result = r
+                    self._stab_observe_locked(r, now)
                     if p.valid:
                         c["valid_results"] += 1
                         self._history.append((w.newest_receipt, p.s_discrete, p.s_expected))
@@ -604,9 +710,12 @@ class LiveEngine:
             counters = self._log_counters()
             log = self._log
             run_id = self._run_id
+            stab_rows = self._take_stab_rows()
         if log is not None:
             for r, fresh in rows:
                 log.put_prediction(_row(r, fresh, counters))
+        self._put_stab(log, stab_rows)
+        if log is not None:
             for kind, detail in log_events:
                 log.put_event(_event_row(self._clock(), self._wall(), run_id, gen, kind, detail))
             if any(kind == "fatal" for kind, _ in log_events):
@@ -622,12 +731,50 @@ class LiveEngine:
         if self._history and not np.isnan(self._history[-1][1]):
             self._history.append((t, np.nan, np.nan))
 
+    def _stab_mark_locked(self, t: float, kind: str):
+        """Stabilized-history break (NaN); a boundary mark for user actions, settings
+        changes and resets that interrupt a shown output."""
+        if self._stab_history and not np.isnan(self._stab_history[-1][1]):
+            self._stab_history.append((t, np.nan))
+            self._marks.append((t, kind))
+        elif kind in ("settings", "user_reset", "user_stabilization_reset"):
+            self._marks.append((t, kind))
+
+    def _stab_reset_locked(self, reason: str, t: float, boundary: bool = False,
+                           new_run: bool = False):
+        self._stab_rows.append(self._stab.reset(reason, t, self._run_id, self._gen,
+                                                boundary=boundary, new_run=new_run))
+        self._stab_mark_locked(t, reason)
+
+    def _stab_observe_locked(self, r: LiveResult, now: float):
+        t0 = time.perf_counter()
+        row = self._stab.observe(observation(r, self._H), now)
+        self._t_stab.append((time.perf_counter() - t0) * 1000)
+        self._stab_rows.append(row)
+        if row["kind"] == "observe":              # not ignored
+            s = row["accepted_s"]
+            self._stab_history.append((r.newest_receipt_mono, np.nan if s is None else s))
+
+    def _take_stab_rows(self) -> list:
+        rows, self._stab_rows = self._stab_rows, []
+        return rows
+
+    @staticmethod
+    def _put_stab(log, rows):
+        put = getattr(log, "put_stabilization", None)    # older log objects: raw only
+        if put is not None:
+            for row in rows:
+                put(row)
+
     def _stop_locked(self, reason: str, state: str = STOPPED):
         if self._accepting:
             self._accepting = False
             self._gen += 1
             self._result = None
-            self._gap_locked(self._clock())
+            now = self._clock()
+            self._gap_locked(now)
+            self._stab_reset_locked("error" if state == ERROR else
+                                    reason if " " not in reason else "stopped", now)
             self._set_state(state, reason)
         elif state == ERROR:
             self._set_state(ERROR, reason)
@@ -647,14 +794,21 @@ class LiveEngine:
             log.put_event(_event_row(self._clock(), self._wall(), self._run_id, self._gen,
                                      kind, detail))
 
+    def _settings_detail(self) -> str:
+        info = self.stabilization_info()
+        return json.dumps({k: info[k] for k in ("revision", "algorithm", "algorithm_version",
+                                                "settings")}, sort_keys=True)
+
     def _close_log(self, reason: str):
         log, self._log = self._log, None
         if log is not None:
             snap = self.snapshot()
             log.put_event(_event_row(self._clock(), self._wall(), snap.run_id, snap.generation,
                                      "stop", reason))
+            st = snap.stabilization
             log.close({"stop_reason": reason, "counters": snap.counters,
-                       "timings": self.timings()})
+                       "timings": self.timings(),
+                       "stabilization": {**self.stabilization_info(), "counters": st.counters}})
 
 
 def _malformed(it: _Item) -> Optional[str]:
@@ -681,7 +835,8 @@ PREDICTION_FIELDS = [
     "max_probability", "dropped_blocks", "dropped_samples", "skipped_stale_windows",
     "expired_before_publish", "resets"]
 EVENT_FIELDS = ["t_mono", "t_wall", "run_id", "generation", "event", "detail"]
-DISPLAY_FIELDS = ["pred_id", "gui_applied_mono", "receipt_to_gui_ms"]
+DISPLAY_FIELDS = ["pred_id", "gui_applied_mono", "receipt_to_gui_ms", "main_output",
+                  "revision", "shown_label"]
 
 
 def _row(r: LiveResult, published: bool, counters: dict) -> dict:

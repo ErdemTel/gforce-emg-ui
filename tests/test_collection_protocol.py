@@ -40,10 +40,10 @@ ALL = ["PREPARE_START", "SETTLE_START", "HOLD_START", "HOLD_END", "REST_START", 
        "TRIAL_END"]
 
 
-def test_default_protocol_is_28_s_with_hold_5_s():
+def test_default_protocol_is_21_s_with_hold_10_s():
     s = ProtocolSettings()
-    assert (s.prepare_s, s.settle_s, s.hold_s, s.rest_s) == (5.0, 3.0, 5.0, 15.0)
-    assert s.total_s == 28.0
+    assert (s.prepare_s, s.settle_s, s.hold_s, s.rest_s) == (5.0, 3.0, 10.0, 3.0)
+    assert s.total_s == 21.0
     assert s.readiness_s == 3.0 and s.emg_freshness_s == 0.5 and s.rest_extension_s == 15.0
     assert s.validate() == []
 
@@ -61,17 +61,17 @@ def test_phase_order_each_event_once_and_exact_deadlines():
     clock.advance(3.0)
     assert [e.name for e in m.update()] == ["HOLD_START"]
     assert m.phase == HOLD
-    clock.advance(5.0)
+    clock.advance(10.0)
     assert [e.name for e in m.update()] == ["HOLD_END", "REST_START"]
-    clock.advance(15.0)
+    clock.advance(3.0)
     assert [e.name for e in m.update()] == ["REST_END", "TRIAL_END"]
     assert m.phase == DONE and m.finished
     assert [e.name for e in m.events] == ALL
     assert [iv["phase"] for iv in m.intervals] == [PREPARE, SETTLE, HOLD, REST]
     assert all(iv["completed"] for iv in m.intervals)
     starts = [iv["start_host_mono"] - t0 for iv in m.intervals]
-    assert starts == pytest.approx([0, 5, 8, 13])
-    assert m.elapsed() == pytest.approx(28.0)
+    assert starts == pytest.approx([0, 5, 8, 18])
+    assert m.elapsed() == pytest.approx(21.0)
     assert not [f for f in m.flags if f["type"] == "overrun"] and m.abort_reason is None
     # this test ticks only at the deadlines: the long gaps between ticks are recorded
     assert {f["type"] for f in m.flags} == {"tick_gap"}

@@ -1,0 +1,81 @@
+{
+  "description": "Golden vectors for emg-stiffness/1 (UI -> robot) and emg-stiffness-state/1 (robot -> UI). Normative examples for docs/design_emg_stiffness_2026-11-02.md section 5. Identical copies live in ros_ws/src/emg_stiffness_bridge/test/data/ and gforce-emg-ui/tests/data/. 'reason' is the canonical rejection code a parser must report for datagrams that are malformed on their own (session/seq/lease rules are receiver state, not parse rules).",
+  "max_datagram_bytes": 2048,
+  "levels": [0.0, 0.5, 1.0],
+  "reason_codes": ["size", "json", "proto", "type", "source", "level", "consistency"],
+  "valid": [
+    {
+      "name": "change_to_medium_stabilized",
+      "datagram": {"proto": "emg-stiffness/1", "source": "gforce-emg-ui", "session": "a1b2c3d4e5f6", "seq": 41, "kind": "change", "s": 0.5, "valid": true, "stabilized": true, "simulated": false, "sent_wall": 1793630000.125, "sent_mono": 5021.375, "stab_ms": {"up": 100, "down": 100, "startup": 100}, "age_ms": 38.5, "status": "HOLDING", "reason": "", "run_id": "20261102_150102_ab12", "revision": 3, "accepted_pred_id": 1207, "last_pred_id": 1209},
+      "expect": {"s": 0.5, "valid": true, "kind": "change", "stabilized": true, "simulated": false}
+    },
+    {
+      "name": "heartbeat_high_minimal_optional_keys",
+      "datagram": {"proto": "emg-stiffness/1", "source": "gforce-emg-ui", "session": "a1b2c3d4e5f6", "seq": 42, "kind": "heartbeat", "s": 1.0, "valid": true, "stabilized": true, "simulated": false, "sent_wall": 1793630000.175, "sent_mono": 5021.425, "stab_ms": {"up": 150, "down": 100, "startup": 100}},
+      "expect": {"s": 1.0, "valid": true, "kind": "heartbeat", "stabilized": true, "simulated": false}
+    },
+    {
+      "name": "integer_zero_is_low",
+      "datagram": {"proto": "emg-stiffness/1", "source": "gforce-emg-ui", "session": "a1b2c3d4e5f6", "seq": 43, "kind": "change", "s": 0, "valid": true, "stabilized": true, "simulated": false, "sent_wall": 1793630000.225, "sent_mono": 5021.475, "stab_ms": {"up": 100, "down": 100, "startup": 100}},
+      "expect": {"s": 0.0, "valid": true, "kind": "change", "stabilized": true, "simulated": false}
+    },
+    {
+      "name": "invalid_output_null",
+      "datagram": {"proto": "emg-stiffness/1", "source": "gforce-emg-ui", "session": "a1b2c3d4e5f6", "seq": 44, "kind": "change", "s": null, "valid": false, "stabilized": true, "simulated": false, "sent_wall": 1793630000.275, "sent_mono": 5021.525, "stab_ms": {"up": 100, "down": 100, "startup": 100}, "age_ms": null, "status": "WAITING", "reason": "stale input"},
+      "expect": {"s": null, "valid": false, "kind": "change", "stabilized": true, "simulated": false}
+    },
+    {
+      "name": "raw_output_stabilization_off_no_stab_ms",
+      "datagram": {"proto": "emg-stiffness/1", "source": "gforce-emg-ui", "session": "a1b2c3d4e5f6", "seq": 45, "kind": "change", "s": 0.0, "valid": true, "stabilized": false, "simulated": false, "sent_wall": 1793630000.325, "sent_mono": 5021.575},
+      "expect": {"s": 0.0, "valid": true, "kind": "change", "stabilized": false, "simulated": false}
+    },
+    {
+      "name": "stop_is_invalid",
+      "datagram": {"proto": "emg-stiffness/1", "source": "gforce-emg-ui", "session": "a1b2c3d4e5f6", "seq": 46, "kind": "stop", "s": null, "valid": false, "stabilized": true, "simulated": false, "sent_wall": 1793630000.375, "sent_mono": 5021.625, "stab_ms": {"up": 100, "down": 100, "startup": 100}, "reason": "disarmed"},
+      "expect": {"s": null, "valid": false, "kind": "stop", "stabilized": true, "simulated": false}
+    },
+    {
+      "name": "test_sender_marked_simulated",
+      "datagram": {"proto": "emg-stiffness/1", "source": "send_stiffness", "session": "cli-0001-xyz", "seq": 0, "kind": "change", "s": 0.5, "valid": true, "stabilized": true, "simulated": true, "sent_wall": 1793630001.0, "sent_mono": 77.0, "stab_ms": {"up": 100, "down": 100, "startup": 100}},
+      "expect": {"s": 0.5, "valid": true, "kind": "change", "stabilized": true, "simulated": true}
+    },
+    {
+      "name": "unknown_keys_are_ignored",
+      "datagram": {"proto": "emg-stiffness/1", "source": "gforce-emg-ui", "session": "a1b2c3d4e5f6", "seq": 47, "kind": "heartbeat", "s": 0.5, "valid": true, "stabilized": true, "simulated": false, "sent_wall": 1793630000.425, "sent_mono": 5021.675, "stab_ms": {"up": 100, "down": 100, "startup": 100}, "future_field": {"anything": [1, 2, 3]}},
+      "expect": {"s": 0.5, "valid": true, "kind": "heartbeat", "stabilized": true, "simulated": false}
+    }
+  ],
+  "invalid": [
+    {"name": "wrong_proto", "datagram": {"proto": "emg-stiffness/2", "source": "gforce-emg-ui", "session": "a1b2c3d4e5f6", "seq": 1, "kind": "change", "s": 0.5, "valid": true, "stabilized": false, "simulated": false, "sent_wall": 1.0, "sent_mono": 1.0}, "reason": "proto"},
+    {"name": "missing_proto", "datagram": {"source": "gforce-emg-ui", "session": "a1b2c3d4e5f6", "seq": 1, "kind": "change", "s": 0.5, "valid": true, "stabilized": false, "simulated": false, "sent_wall": 1.0, "sent_mono": 1.0}, "reason": "proto"},
+    {"name": "unknown_source", "datagram": {"proto": "emg-stiffness/1", "source": "someone-else", "session": "a1b2c3d4e5f6", "seq": 1, "kind": "change", "s": 0.5, "valid": true, "stabilized": false, "simulated": false, "sent_wall": 1.0, "sent_mono": 1.0}, "reason": "source"},
+    {"name": "s_not_a_level", "datagram": {"proto": "emg-stiffness/1", "source": "gforce-emg-ui", "session": "a1b2c3d4e5f6", "seq": 1, "kind": "change", "s": 0.75, "valid": true, "stabilized": false, "simulated": false, "sent_wall": 1.0, "sent_mono": 1.0}, "reason": "level"},
+    {"name": "s_out_of_range", "datagram": {"proto": "emg-stiffness/1", "source": "gforce-emg-ui", "session": "a1b2c3d4e5f6", "seq": 1, "kind": "change", "s": 2.0, "valid": true, "stabilized": false, "simulated": false, "sent_wall": 1.0, "sent_mono": 1.0}, "reason": "level"},
+    {"name": "s_string", "datagram": {"proto": "emg-stiffness/1", "source": "gforce-emg-ui", "session": "a1b2c3d4e5f6", "seq": 1, "kind": "change", "s": "0.5", "valid": true, "stabilized": false, "simulated": false, "sent_wall": 1.0, "sent_mono": 1.0}, "reason": "type"},
+    {"name": "s_bool", "datagram": {"proto": "emg-stiffness/1", "source": "gforce-emg-ui", "session": "a1b2c3d4e5f6", "seq": 1, "kind": "change", "s": true, "valid": true, "stabilized": false, "simulated": false, "sent_wall": 1.0, "sent_mono": 1.0}, "reason": "type"},
+    {"name": "valid_true_with_null_s", "datagram": {"proto": "emg-stiffness/1", "source": "gforce-emg-ui", "session": "a1b2c3d4e5f6", "seq": 1, "kind": "change", "s": null, "valid": true, "stabilized": false, "simulated": false, "sent_wall": 1.0, "sent_mono": 1.0}, "reason": "consistency"},
+    {"name": "valid_false_with_level", "datagram": {"proto": "emg-stiffness/1", "source": "gforce-emg-ui", "session": "a1b2c3d4e5f6", "seq": 1, "kind": "change", "s": 0.5, "valid": false, "stabilized": false, "simulated": false, "sent_wall": 1.0, "sent_mono": 1.0}, "reason": "consistency"},
+    {"name": "stop_with_level", "datagram": {"proto": "emg-stiffness/1", "source": "gforce-emg-ui", "session": "a1b2c3d4e5f6", "seq": 1, "kind": "stop", "s": 0.5, "valid": true, "stabilized": false, "simulated": false, "sent_wall": 1.0, "sent_mono": 1.0}, "reason": "consistency"},
+    {"name": "seq_negative", "datagram": {"proto": "emg-stiffness/1", "source": "gforce-emg-ui", "session": "a1b2c3d4e5f6", "seq": -1, "kind": "change", "s": 0.5, "valid": true, "stabilized": false, "simulated": false, "sent_wall": 1.0, "sent_mono": 1.0}, "reason": "type"},
+    {"name": "seq_float", "datagram": {"proto": "emg-stiffness/1", "source": "gforce-emg-ui", "session": "a1b2c3d4e5f6", "seq": 1.5, "kind": "change", "s": 0.5, "valid": true, "stabilized": false, "simulated": false, "sent_wall": 1.0, "sent_mono": 1.0}, "reason": "type"},
+    {"name": "session_too_short", "datagram": {"proto": "emg-stiffness/1", "source": "gforce-emg-ui", "session": "abc", "seq": 1, "kind": "change", "s": 0.5, "valid": true, "stabilized": false, "simulated": false, "sent_wall": 1.0, "sent_mono": 1.0}, "reason": "type"},
+    {"name": "session_bad_chars", "datagram": {"proto": "emg-stiffness/1", "source": "gforce-emg-ui", "session": "abc def/ghi", "seq": 1, "kind": "change", "s": 0.5, "valid": true, "stabilized": false, "simulated": false, "sent_wall": 1.0, "sent_mono": 1.0}, "reason": "type"},
+    {"name": "unknown_kind", "datagram": {"proto": "emg-stiffness/1", "source": "gforce-emg-ui", "session": "a1b2c3d4e5f6", "seq": 1, "kind": "pulse", "s": 0.5, "valid": true, "stabilized": false, "simulated": false, "sent_wall": 1.0, "sent_mono": 1.0}, "reason": "type"},
+    {"name": "valid_not_bool", "datagram": {"proto": "emg-stiffness/1", "source": "gforce-emg-ui", "session": "a1b2c3d4e5f6", "seq": 1, "kind": "change", "s": 0.5, "valid": 1, "stabilized": false, "simulated": false, "sent_wall": 1.0, "sent_mono": 1.0}, "reason": "type"},
+    {"name": "missing_simulated", "datagram": {"proto": "emg-stiffness/1", "source": "gforce-emg-ui", "session": "a1b2c3d4e5f6", "seq": 1, "kind": "change", "s": 0.5, "valid": true, "stabilized": false, "sent_wall": 1.0, "sent_mono": 1.0}, "reason": "type"},
+    {"name": "stabilized_without_stab_ms", "datagram": {"proto": "emg-stiffness/1", "source": "gforce-emg-ui", "session": "a1b2c3d4e5f6", "seq": 1, "kind": "change", "s": 0.5, "valid": true, "stabilized": true, "simulated": false, "sent_wall": 1.0, "sent_mono": 1.0}, "reason": "type"},
+    {"name": "stab_ms_negative", "datagram": {"proto": "emg-stiffness/1", "source": "gforce-emg-ui", "session": "a1b2c3d4e5f6", "seq": 1, "kind": "change", "s": 0.5, "valid": true, "stabilized": true, "simulated": false, "sent_wall": 1.0, "sent_mono": 1.0, "stab_ms": {"up": -1, "down": 100, "startup": 100}}, "reason": "type"},
+    {"name": "sent_mono_not_finite_string", "datagram": {"proto": "emg-stiffness/1", "source": "gforce-emg-ui", "session": "a1b2c3d4e5f6", "seq": 1, "kind": "change", "s": 0.5, "valid": true, "stabilized": false, "simulated": false, "sent_wall": 1.0, "sent_mono": "NaN"}, "reason": "type"},
+    {"name": "optional_age_negative", "datagram": {"proto": "emg-stiffness/1", "source": "gforce-emg-ui", "session": "a1b2c3d4e5f6", "seq": 1, "kind": "change", "s": 0.5, "valid": true, "stabilized": false, "simulated": false, "sent_wall": 1.0, "sent_mono": 1.0, "age_ms": -5}, "reason": "type"},
+    {"name": "optional_reason_too_long", "datagram": {"proto": "emg-stiffness/1", "source": "gforce-emg-ui", "session": "a1b2c3d4e5f6", "seq": 1, "kind": "change", "s": 0.5, "valid": true, "stabilized": false, "simulated": false, "sent_wall": 1.0, "sent_mono": 1.0, "reason": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}, "reason": "type"},
+    {"name": "top_level_array", "datagram": [1, 2, 3], "reason": "json"}
+  ],
+  "invalid_raw": [
+    {"name": "not_json", "utf8": "{not json", "reason": "json"},
+    {"name": "not_utf8_hex", "hex": "ff fe 00 7b", "reason": "json"},
+    {"name": "oversize", "utf8_repeat": {"unit": "x", "count": 2049}, "reason": "size"}
+  ],
+  "state_example": {
+    "proto": "emg-stiffness-state/1", "side": "right", "armed": true, "dry_run": true, "latched": false, "phase": "idle", "requested_s": 0.5, "target_s": null, "applied_s": 0.5, "detail": "dry run: holding applied level", "control_state": "normal", "teleop_active": true, "seq": 12, "session": "a1b2c3d4e5f6"
+  }
+}

@@ -5,19 +5,25 @@ Plan mode: Object / Target / Movement show the controller's pending trial. Only
 user activation (`activated`) edits it, one field at a time; programmatic display
 uses QSignalBlocker and never counts as an edit. Surface Press and Open hand are
 task conditions listed after the objects; each is ticked separately (opt-in).
-Surface Press is always stationary; Open hand has the plan's movements."""
+Surface Press is always stationary; Open hand has the plan's movements.
 
+Folder mode (default): only a folder and stiffness 0 / 1; the Plan / Manual form is
+hidden. Same protocol, recorder, trial.json and review."""
+
+import re
 from pathlib import Path
 from typing import Callable, Optional
 
 from PyQt5 import QtCore, QtGui, QtWidgets
 
-from ..collection.controller import (AVAILABILITY_BYPASS_TEXT, FINALIZING, HAND_SIDES, IDLE,
-                                     MANUAL_OVERRIDE, REVIEW, REVIEW_REASONS, ROLES, RUNNING,
-                                     SAVING_REVIEW, CollectionController, TrialSpec)
+from ..collection.controller import (AVAILABILITY_BYPASS_TEXT, FINALIZING, FOLDER_OBJECT,
+                                     HAND_SIDES, IDLE, MANUAL_OVERRIDE, REVIEW, REVIEW_REASONS,
+                                     ROLES, RUNNING, SAVING_REVIEW, CollectionController,
+                                     TrialSpec, folder_ids)
 from ..collection.plan import (DEFAULT_PLAN_COUNTS, EMPTY_HAND, EXTENDABLE, EXTENDED,
-                               FIELD_NAMES, TASK_CONDITIONS, TASKS, default_posture, describe,
-                               merge_objects, task_motion_counts, trial_values)
+                               FIELD_NAMES, TASK_CONDITIONS, TASKS, attempt_category,
+                               default_posture, describe, merge_objects, task_motion_counts,
+                               trial_values)
 from ..collection.protocol import (ABORTED, HOLD, OPEN_HAND, OPEN_HAND_POSTURE, PREPARE, REST,
                                    SETTLE, MOTION_ORDER, MOTIONS, STATIONARY, SURFACE_PRESS,
                                    SURFACE_PRESS_POSTURE, TARGET_ORDER, TARGETS,
@@ -28,7 +34,8 @@ TICK_MS = 50
 PHASE_COLORS = {PREPARE: "#1565c0", SETTLE: "#ef6c00", HOLD: "#2e7d32", REST: "#757575",
                 ABORTED: "#c62828"}
 AUDIO_EVENTS = ("PREPARE_START", "SETTLE_START", "HOLD_START", "REST_START", "ABORT")
-PLAN_MODE, MANUAL_MODE = "plan", "manual"
+PLAN_MODE, MANUAL_MODE, FOLDER_MODE = "plan", "manual", "folder"
+STIFFNESS_TARGETS = {0: "low", 1: "high"}        # folder mode: stiffness value -> target
 MOTION_SHORT = {STATIONARY: "stationary", "wrist_flex_ext": "wrist flex/ext",
                 "forearm_rotation": "forearm rotation", "reach_sweep": "reach/sweep"}
 POSTURE_SHORT = {SURFACE_PRESS_POSTURE: "press", OPEN_HAND_POSTURE: "open"}   # narrow panel
@@ -127,6 +134,7 @@ class StiffnessCollectionPanel(QtWidgets.QWidget):
                                                context=context)
         self.controller.on_cue = self._on_cue
         self.output_root = Path(data_dir) / "stiffness_collection"
+        self.folder: Optional[Path] = None           # folder mode: chosen by the operator
         self._last_state = None
         self._last_owns = False
         self._reviews_seen = 0
@@ -164,11 +172,36 @@ class StiffnessCollectionPanel(QtWidgets.QWidget):
         self.sim_banner.setVisible(self.controller.is_simulation)
         v.addWidget(self.sim_banner)
 
-        form = self._form = QtWidgets.QFormLayout()
+        self.simple_form = QtWidgets.QWidget()          # folder mode: folder, stiffness
+        sf = QtWidgets.QFormLayout(self.simple_form)
+        sf.setContentsMargins(0, 0, 0, 0)
+        sf.setVerticalSpacing(6)
+        self.folder_label = QtWidgets.QLabel("<i>not chosen</i>")
+        self.btn_folder = QtWidgets.QPushButton("Choose…")
+        row = QtWidgets.QHBoxLayout()
+        row.addWidget(self.folder_label, 1)
+        row.addWidget(self.btn_folder)
+        sf.addRow("1. Folder", row)
+        self.stiff_group = QtWidgets.QButtonGroup(self)
+        row = QtWidgets.QHBoxLayout()
+        for value in STIFFNESS_TARGETS:
+            rb = QtWidgets.QRadioButton(str(value))
+            rb.setStyleSheet("font-size:16px; font-weight:bold;")
+            self.stiff_group.addButton(rb, value)
+            row.addWidget(rb)
+        row.addStretch(1)
+        sf.addRow("2. Stiffness", row)
+        v.addWidget(self.simple_form)
+
+        self.full_form = QtWidgets.QWidget()            # Plan / Manual (hidden in folder mode)
+        form = self._form = QtWidgets.QFormLayout(self.full_form)
+        form.setContentsMargins(0, 0, 0, 0)
         form.setVerticalSpacing(4)
         self.mode_combo = QtWidgets.QComboBox()
         self.mode_combo.addItem("Plan (dev. trials)", PLAN_MODE)
         self.mode_combo.addItem("Manual (practice / test)", MANUAL_MODE)
+        self.mode_combo.addItem("Folder (stiffness 0 / 1)", FOLDER_MODE)
+        self.mode_combo.setCurrentIndex(self.mode_combo.findData(FOLDER_MODE))
         self.mode_combo.setToolTip("Plan: the persistent development plan (200 trials; +30 "
                                    "Surface Press, +35 Open hand).\n"
                                    "Manual: choose condition/target yourself for practice or "
@@ -278,7 +311,7 @@ class StiffnessCollectionPanel(QtWidgets.QWidget):
         self.notes_edit = QtWidgets.QLineEdit()
         self.notes_edit.setPlaceholderText("optional")
         form.addRow("Notes", self.notes_edit)
-        v.addLayout(form)
+        v.addWidget(self.full_form)
         for combo in (self.mode_combo, self.hand_combo, self.plan_combo, self.object_combo,
                       self.target_combo, self.motion_combo, self.role_combo, self.posture_combo):
             # Narrow side panel: let combos shrink (full text stays in the popup)
@@ -376,6 +409,7 @@ class StiffnessCollectionPanel(QtWidgets.QWidget):
         self.btn_reset_sel.clicked.connect(self._reset_selection)
         self.session_edit.editingFinished.connect(self._on_session_changed)
         self.btn_out.clicked.connect(self._choose_output)
+        self.btn_folder.clicked.connect(self._choose_folder)
         self.btn_advanced.toggled.connect(self._toggle_advanced)
         self.btn_start.clicked.connect(self.start_trial)
         self.btn_abort.clicked.connect(lambda: self.abort("user_abort"))
@@ -416,6 +450,7 @@ class StiffnessCollectionPanel(QtWidgets.QWidget):
         self.audio_check.setChecked(s.audio_cues)
         self.audio_check.toggled.connect(self._apply_settings)
         f.addRow(self.audio_check)
+        self._adv_form = f
         self.seed_edit = QtWidgets.QLineEdit()
         self.seed_edit.setPlaceholderText("random")
         f.addRow("New-plan seed", self.seed_edit)
@@ -440,6 +475,8 @@ class StiffnessCollectionPanel(QtWidgets.QWidget):
         self.btn_save_objects = QtWidgets.QPushButton("Save object names")
         self.btn_save_objects.clicked.connect(self._save_objects)
         f.addRow(self.btn_save_objects)
+        self._plan_settings = (self.seed_edit, *self.extend_buttons.values(),
+                               self.objects_edit, self.btn_save_objects)
         return w
 
     # -- user actions ------------------------------------------------------------------
@@ -449,7 +486,8 @@ class StiffnessCollectionPanel(QtWidgets.QWidget):
 
     def _toggle_advanced(self, on: bool):
         self.advanced.setVisible(on)
-        self.btn_advanced.setText(("▾" if on else "▸") + " Protocol && plan settings")
+        title = "Protocol settings" if self.mode == FOLDER_MODE else "Protocol && plan settings"
+        self.btn_advanced.setText(("▾" if on else "▸") + " " + title)
 
     def _apply_settings(self, *_):
         if self.controller.state != IDLE and self.controller.state != REVIEW:
@@ -463,7 +501,8 @@ class StiffnessCollectionPanel(QtWidgets.QWidget):
     def _reopen_participant(self):
         c = self.controller
         pid = self.participant_edit.text().strip()
-        if c.state != IDLE or (pid == c.participant_id and self.output_root == c.output_root):
+        if c.state != IDLE or (pid == c.participant_id and self.output_root == c.output_root
+                               and c.folder is None):
             return
         c.open_participant(self.output_root, pid)
         self._plans_shown = None
@@ -474,6 +513,26 @@ class StiffnessCollectionPanel(QtWidgets.QWidget):
                                                        str(self.output_root))
         if d:
             self.set_output_root(Path(d))
+
+    def _choose_folder(self):
+        d = QtWidgets.QFileDialog.getExistingDirectory(self, "Recording folder",
+                                                       str(self.folder or self.output_root))
+        if d:
+            self.set_folder(Path(d))
+
+    def set_folder(self, path: Path) -> bool:
+        """Folder mode: save the next trials directly in `path`."""
+        if self.controller.state != IDLE or self.controller.extending:
+            return False
+        self.folder = Path(path)
+        pid, sid = folder_ids(self.folder)
+        text = str(self.folder)
+        fm = self.folder_label.fontMetrics()
+        self.folder_label.setText(fm.elidedText(text, QtCore.Qt.ElideLeft, 105))
+        self.folder_label.setToolTip(f"{text}\nSaved as participant {pid}, session {sid}")
+        if self.mode == FOLDER_MODE:
+            self.controller.open_folder(self.folder)
+        return True
 
     def _show_output_root(self):
         text = str(self.output_root)
@@ -488,6 +547,20 @@ class StiffnessCollectionPanel(QtWidgets.QWidget):
         self._reopen_participant()
 
     def _on_mode_changed(self, *_):
+        folder = self.mode == FOLDER_MODE
+        self.simple_form.setVisible(folder)
+        self.full_form.setVisible(not folder)
+        for w in self._plan_settings:
+            w.setVisible(not folder)
+            lab = self._adv_form.labelForField(w)
+            if lab is not None:
+                lab.setVisible(not folder)
+        self._toggle_advanced(self.btn_advanced.isChecked())
+        c = self.controller
+        if folder and self.folder is not None and c.folder != self.folder:
+            c.open_folder(self.folder)
+        elif not folder and c.folder is not None:
+            self._reopen_participant()
         plan = self.mode == PLAN_MODE
         for w, show in ((self.plan_row, plan), (self.avail_row, plan), (self.next_label, plan),
                         (self.sel_row, plan), (self.trial_spin, not plan)):
@@ -632,8 +705,26 @@ class StiffnessCollectionPanel(QtWidgets.QWidget):
         if oid in TASKS and TASKS[oid].stationary_only:  # surface press: stationary only
             self.motion_combo.setCurrentIndex(self.motion_combo.findData(STATIONARY))
 
+    def _next_folder_trial(self) -> int:
+        """Folder mode: trial m### after the highest one saved in the folder."""
+        nums = [int(r["trial_id"][1:]) for r in self.controller.records.values()
+                if r.get("plan_id") is None and re.fullmatch(r"m\d{3}", str(r.get("trial_id")))]
+        return min(max(nums, default=0) + 1, 999)
+
+    def _folder_spec(self) -> TrialSpec:
+        pid, sid = folder_ids(self.folder) if self.folder is not None else ("", "")
+        return TrialSpec(
+            participant_id=pid, session_id=sid, object_id=FOLDER_OBJECT,
+            object_name="Unspecified", posture_id=FOLDER_OBJECT,
+            target_label=STIFFNESS_TARGETS.get(self.stiff_group.checkedId(), ""),
+            motion_condition=STATIONARY, dataset_role="development",
+            output_root=self.folder or "", trial_number=self._next_folder_trial(),
+            folder=self.folder)
+
     def spec(self) -> TrialSpec:
         c = self.controller
+        if self.mode == FOLDER_MODE:
+            return self._folder_spec()
         planned = c.planned_trial() if self.mode == PLAN_MODE else None
         if planned:                              # Plan mode: from the controller, not the combos
             oid, target, posture = (planned["object_id"], planned["target_label"],
@@ -664,6 +755,16 @@ class StiffnessCollectionPanel(QtWidgets.QWidget):
     def start_blockers(self) -> list:
         c = self.controller
         blockers = c.start_blockers(self.spec())
+        if self.mode == FOLDER_MODE:                 # say what to choose, not why the IDs fail
+            first, noise = [], []
+            if self.folder is None:
+                first.append("Choose a folder")
+                noise += ["Participant ID", "Session ID", "Output directory",
+                          "Participant data not loaded", "Development trials"]
+            if self.stiff_group.checkedId() not in STIFFNESS_TARGETS:
+                first.append("Choose stiffness 0 or 1")
+                noise.append("Target:")
+            return first + [b for b in blockers if not any(n in b for n in noise)]
         if self.mode == PLAN_MODE and c.planned_trial() is None:
             p = c.pending
             if c.plan is None:
@@ -967,7 +1068,8 @@ class StiffnessCollectionPanel(QtWidgets.QWidget):
         for w in (self.session_edit, self.hand_combo, self.notes_edit, self.posture_desc,
                   self.btn_advanced):
             w.setEnabled(idle)
-        for w in (self.mode_combo, self.participant_edit, self.btn_out):
+        for w in (self.mode_combo, self.participant_edit, self.btn_out, self.btn_folder,
+                  *self.stiff_group.buttons()):
             w.setEnabled(free)
         self.advanced.setEnabled(idle)
         self.plan_combo.setEnabled(free and plan_mode and len(c.plans) > 0)
@@ -1052,7 +1154,21 @@ class StiffnessCollectionPanel(QtWidgets.QWidget):
     def _show_progress(self):
         c = self.controller
         sim = " <b style='color:#6a1b9a'>(SIMULATED – not real data)</b>" if c.is_simulation else ""
-        if self.mode == PLAN_MODE and c.progress is not None:
+        if self.mode == FOLDER_MODE:
+            if self.folder is None:
+                self.progress_label.setText("Choose the folder to save the trials in.")
+                return
+            counts = {value: 0 for value in STIFFNESS_TARGETS}
+            for rec in c.records.values():
+                if attempt_category(rec, c.live_ids) == "accepted":
+                    for value, target in STIFFNESS_TARGETS.items():
+                        counts[value] += (rec.get("label") or {}).get("target_label") == target
+            pid, sid = folder_ids(self.folder)
+            self.progress_label.setText(
+                f"<b>Accepted in this folder</b>{sim}<br>"
+                + " · ".join(f"stiffness {v}: {n}" for v, n in counts.items())
+                + f"<br><small>Saved as participant {pid}, session {sid}.</small>")
+        elif self.mode == PLAN_MODE and c.progress is not None:
             p = c.progress
             rows = ["<tr><th align='left'>condition</th><th>Low</th><th>Med</th><th>High</th></tr>"]
             for obj in c.plan.counts:

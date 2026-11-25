@@ -1,19 +1,30 @@
 """Live Classifier tab: the frozen model's live prediction s = 0 / 0.5 / 1, or s = --.
 
-Display-only. A thin Qt layer over live.engine.LiveEngine: inference and the freshness
-watchdog run on their own threads whether or not this tab is visible; refresh() (GUI
-thread, only while visible) reads the latest-result snapshot and redraws what changed.
-The model is loaded only on request, after a trust confirmation, on a background thread.
+A thin Qt layer over live.engine.LiveEngine: inference, output stabilization and the
+freshness watchdog run on their own threads whether or not this tab is visible;
+refresh() (GUI thread, only while visible) reads the latest-result snapshot and redraws
+what changed. The large value is the raw output, or the stabilized command when
+stabilization is ON; raw output and probabilities stay visible. Stabilization edits are a
+draft until Apply; applied settings persist (QSettings). The model is loaded only on
+request, after a trust confirmation, on a background thread.
+
+Optional robot output (live.robot_out): nothing leaves this PC until the operator ticks
+'Send to robot' and confirms the target. Then a sender thread streams the shown s to the
+robot bridge (UDP), which decides what the hand does. It disarms itself on model load,
+Apply settings, Stop, a band that is not streaming and app close; the armed state is
+never stored. Widgets change on the GUI thread only.
 """
 
 import collections
+import html
+import json
 import threading
 import time
 import uuid
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple
 
 import numpy as np
 import pyqtgraph as pg
@@ -21,13 +32,18 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 
 from .. import __version__
 from ..collection.storage import git_info
-from ..live import compat
-from ..live.engine import (ERROR, INVALID_INPUT, NO_MODEL, READY, RUNNING, STALE, STOPPED,
-                           WARMING_UP, LiveEngine, LiveSettings)
+from ..live import compat, robot_out
+from ..live.engine import (ERROR, HUB_CHANNELS, INVALID_INPUT, NO_MODEL, READY, RUNNING, STALE,
+                           STOPPED, WARMING_UP, LiveEngine, LiveSettings)
 from ..live.log import LogRootError, PredictionLog, check_root
 from ..live.model import TRUST_NOTE, ModelError, classifier_status, load_trusted_model
+from ..live.robot_out import RobotOutput, RobotOutputSettings
+from ..live.stabilization import (CONFIRMING, GATE_NOT_MET, HOLDING, LABELS, OFF, PENDING,
+                                  S_VALUE, SETTINGS_SCHEMA, UNSUPPORTED, WAITING,
+                                  StabilizerSettings, describe)
 from ..sources import DISCONNECTING, FAILED, IDLE, RECONNECTING, STREAMING
 from .collection_panel import LiveText
+from .gain_table_panel import GainTablePanel
 
 NOTE = ("Instructed-effort prediction, not measured stiffness.\n"
         "Low was trained as minimal effort while maintaining the grasp/fist;\n"
@@ -39,7 +55,93 @@ STATE_COLORS = {RUNNING: "#2e7d32", WARMING_UP: "#1565c0", STALE: "#ef6c00",
 LEVEL_TAGS = {compat.OK: ("#2e7d32", "ok"), compat.WARN: ("#ef6c00", "warn"),
               compat.UNKNOWN: ("#ef6c00", "unknown"), compat.BLOCK: ("#c62828", "BLOCK")}
 BAR_COLORS = ("#86b6ef", "#2a78d6", "#104281")   # ordinal blue ramp: low -> high
-S_COLOR, SOFT_COLOR = "#2a78d6", "#eb6834"
+DEFAULT_CLASSES = tuple((i, l, S_VALUE[l]) for i, l in enumerate(LABELS))   # until a model loads
+S_COLOR, SOFT_COLOR, STAB_COLOR, MARK_COLOR = "#2a78d6", "#eb6834", "#1b1b1b", "#9e9e9e"
+STAB_COLORS = {OFF: "#757575", WAITING: "#757575", CONFIRMING: "#1565c0", PENDING: "#1565c0",
+               HOLDING: "#2e7d32", GATE_NOT_MET: "#ef6c00", UNSUPPORTED: "#c62828"}
+STORE_KEY, SCHEMA_KEY = "live_stabilization/settings", "live_stabilization/schema"
+TIP_CONFIRM = ("How long a {d} class must win every processed prediction, without a break, "
+               "before it replaces the shown class. Measured on host receipt times of the "
+               "windows (not acquisition time). Longer suppresses short excursions but delays "
+               "real changes; it adds to window, transport and inference delay. Brief "
+               "intentional commands may also be rejected. Filtering cannot repair "
+               "sustained misclassification. 0 = accept on the first prediction.")
+TIPS = {
+    "enable": "ON: the large value is the stabilized command (a class change is shown only "
+              "after it persists). OFF: the raw classifier output, unchanged. Takes effect "
+              "on Apply settings.",
+    "startup": "Like the confirmations, while no class is accepted (after Start, any reset, "
+               "a settings change, invalid input or an expired hold): s = -- until confirmed.",
+    "gate": "Also require the candidate's score >= minimum, and >= margin above the shown "
+            "class's score. Scores are classifier outputs, not calibrated certainty. A "
+            "failed gate restarts the candidate. Off by default.",
+    "minp": "Minimum classifier score of the candidate (not a reliability).",
+    "margin": "Candidate score minus the shown class's score (not used while no class is "
+              "accepted).",
+    "gap": "If two consecutive predictions were received farther apart than this, a pending "
+           "change restarts from zero. At most the engine's stale limit.",
+    "hold": "If predictions keep arriving but none supports the shown class for this long, "
+            "and no change can be confirmed, the output becomes unavailable (unsupported "
+            "hold expired; not a stale-input error). Must be >= the longer confirmation + "
+            "maximum evidence gap.",
+    "defaults": "Put the initial engineering values (not validated optima) into the "
+                "controls; the Enable box is kept. Apply settings makes them active.",
+    "reset": "Clear the stabilizer only (s = -- until a class is confirmed again). The raw "
+             "output, the window buffer and any recording are not affected.",
+    "robot_host": "IP address of the PC running the robot bridge (emg_stiffness_bridge), "
+                  "e.g. 127.0.0.1 when it runs on this PC. Host names are never resolved.",
+    "robot_port": "UDP port of the bridge's receiver (default 6731).",
+    "robot_send": "Stream the shown s to the robot bridge (emg-stiffness/1 heartbeats, 20 Hz "
+                  "by default, + each change), after a confirmation. s = -- is sent as null, "
+                  "never 0: the bridge then holds its gains. Disarms on model load, Apply "
+                  "settings, Stop, a band that is not streaming and app close.",
+    "robot_ack": "Robot output while the Compatibility box shows warnings / unknowns, or with "
+                 "the simulator, needs this extra tick (independent of the Start "
+                 "acknowledgement). Cleared whenever the compatibility check changes.",
+}
+ROBOT_CLOSE_S = 0.5             # shutdown: bounded wait for the sender's last datagram ('stop')
+ROBOT_MIN_CONFIRM_MS = 100      # emg_stiffness_bridge default min_confirm_ms
+ROBOT_CONFIRM = ("The robot bridge acts only if it is armed on the robot side and its own "
+                 "checks pass (by default: stabilization ON with every confirmation ≥ "
+                 f"{ROBOT_MIN_CONFIRM_MS} ms, real EMG, dry run). s = -- is sent as null and "
+                 "the robot holds its gains. The model predicts the instructed effort class "
+                 "from steady holds; transitions, latency and rest were not evaluated, and "
+                 "its probabilities are not calibrated.")
+
+
+def settings_store() -> QtCore.QSettings:
+    """Per-user INI file (Linux: ~/.config/gforce-emg-ui/live-classifier.ini)."""
+    return QtCore.QSettings(QtCore.QSettings.IniFormat, QtCore.QSettings.UserScope,
+                            "gforce-emg-ui", "live-classifier")
+
+
+def load_stabilization(store, stale_ms: float) -> Tuple[Optional[StabilizerSettings], str]:
+    """(applied settings or None, note). Missing -> (None, ""); unusable -> (None, why)."""
+    raw = store.value(STORE_KEY)
+    if raw is None:
+        return None, ""
+    try:
+        schema = int(store.value(SCHEMA_KEY))
+        if schema != SETTINGS_SCHEMA:
+            raise ValueError(f"schema {schema}, expected {SETTINGS_SCHEMA}")
+        return StabilizerSettings.from_dict(json.loads(raw), stale_ms), ""
+    except (TypeError, ValueError) as e:
+        return None, f"Stored stabilization settings ignored ({e}); defaults shown, OFF."
+
+
+def save_stabilization(store, settings: StabilizerSettings):
+    store.setValue(SCHEMA_KEY, SETTINGS_SCHEMA)
+    store.setValue(STORE_KEY, json.dumps(settings.to_dict(), sort_keys=True))
+    store.sync()
+
+
+def _summary(st: StabilizerSettings) -> str:
+    if not st.enabled:
+        return "OFF (raw output shown)"
+    gate = (f"gate p ≥ {st.min_probability:.2f}, margin ≥ {st.min_margin:.2f}" if st.gate
+            else "gate off")
+    return (f"ON · up {st.up_ms} / down {st.down_ms} / startup {st.startup_ms} ms · {gate} · "
+            f"gap ≤ {st.max_gap_ms} ms · hold ≤ {st.max_unsupported_ms} ms")
 
 
 def _set_enabled(w, on: bool):
@@ -57,16 +159,33 @@ def _fmt_ms(t: dict) -> str:
     return "--" if t["p50"] is None else f"p50 {t['p50']:.2f} / p95 {t['p95']:.2f} ms (n={t['n']})"
 
 
+def _fmt_s(v) -> str:
+    return "--" if v is None else f"{v:g}"
+
+
+def _esc(text) -> str:
+    """Plain text (e.g. from the robot's state datagrams) for a rich-text label."""
+    return html.escape(str(text), quote=False)
+
+
 class ProbBars(QtWidgets.QWidget):
-    """Three labelled probability bars; paints itself (no relayout on updates)."""
+    """One labelled probability bar per model class; paints itself (no relayout on updates)."""
 
     ROW = 26
 
-    def __init__(self, labels=("low", "medium", "high"), parent=None):
+    def __init__(self, labels=LABELS, parent=None):
         super().__init__(parent)
-        self.labels = tuple(labels)
+        self.labels = ()
         self._p = None
-        self.setFixedHeight(self.ROW * len(self.labels) + 8)
+        self.set_labels(labels)
+
+    def set_labels(self, labels):
+        """The loaded model's classes (relayout once, on model change only)."""
+        labels = tuple(labels)
+        if labels != self.labels:
+            self.labels, self._p = labels, None
+            self.setFixedHeight(self.ROW * len(self.labels) + 8)
+            self.update()
 
     def sizeHint(self):
         return QtCore.QSize(360, self.height())
@@ -100,7 +219,8 @@ class ProbBars(QtWidgets.QWidget):
             text = "--"
             if self._p is not None:
                 v = self._p[i]
-                p.setBrush(QtGui.QColor(BAR_COLORS[i % len(BAR_COLORS)]))
+                k = LABELS.index(label) if label in LABELS else i
+                p.setBrush(QtGui.QColor(BAR_COLORS[k % len(BAR_COLORS)]))
                 p.drawRoundedRect(QtCore.QRectF(x0, y + 4, max(0.0, (x1 - x0) * v),
                                                 self.ROW - 12), 3, 3)
                 text = f"{100 * v:.1f} %"
@@ -111,14 +231,31 @@ class ProbBars(QtWidgets.QWidget):
 
 class LiveClassifierDashboard(QtWidgets.QWidget):
     model_loaded = QtCore.pyqtSignal(object, int)       # (LoadedModel | ModelError, token)
+    robot_armed = QtCore.pyqtSignal(bool, str)          # (armed, "ip:port"), on every change
 
     def __init__(self, hub, source, parent=None, settings: Optional[LiveSettings] = None,
-                 log_root: Optional[Path] = None, clock=time.monotonic):
+                 log_root: Optional[Path] = None, clock=time.monotonic, store=None,
+                 robot_target: Optional[Tuple[str, int]] = None,
+                 emg_producer: bool = False, managed_output: bool = False):
         super().__init__(parent)
+        self.managed_output = bool(managed_output)
+        self.emg_producer = bool(emg_producer or managed_output)
         self.hub = hub
         self.source = source
         self._clock = clock
+        self._soft_formula = ""
         self.engine = LiveEngine(hub, settings, clock=clock)
+        self.store = store if store is not None else settings_store()
+        stored, self.stab_note = load_stabilization(self.store, self._stale_ms)
+        if stored is not None:
+            self.engine.set_stabilization(stored)
+        target, self.robot_note = robot_out.load_settings(self.store)
+        target = target or RobotOutputSettings()
+        if robot_target is not None:                 # --robot-udp: prefill only, never arm
+            target = replace(target, host=robot_target[0], port=int(robot_target[1]))
+        self.robot = RobotOutput(self.engine, target, clock=clock, emg_only=self.emg_producer,
+                                 simulated=bool(getattr(source, "is_simulation", False)))
+        self._robot_signalled = (False, target.target)
         self.model = None
         self.report: Optional[compat.CompatReport] = None
         self.load_error = ""
@@ -138,6 +275,7 @@ class LiveClassifierDashboard(QtWidgets.QWidget):
         self.start_error = ""
         self.redraw_count = 0
         self._build()
+        self._set_stab_controls(self.engine.stabilizer_settings)
         self.model_loaded.connect(self._on_model_loaded)
         source.connected.connect(self._on_connected)
         source.params.connect(self._on_params)
@@ -146,6 +284,7 @@ class LiveClassifierDashboard(QtWidgets.QWidget):
         ok, msg = classifier_status()
         self._show_model(msg if not ok else "")
         self._recheck()
+        self._show_robot()
 
     # -- layout -------------------------------------------------------------------
     def _build(self):
@@ -158,8 +297,14 @@ class LiveClassifierDashboard(QtWidgets.QWidget):
         scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
         scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
         scroll.setFixedWidth(440)
+        self.source_box = self._build_source_mode()
+        self.source_box.setVisible(not self.emg_producer)
+        self.source_mode.setEnabled(not self.emg_producer)
+        lv.addWidget(self.source_box)
+        self.classifier_boxes = []
 
         box = QtWidgets.QGroupBox("Model")
+        self.classifier_boxes.append(box)
         bl = QtWidgets.QVBoxLayout(box)
         self.btn_load = QtWidgets.QPushButton("Load model…")
         self.btn_load.clicked.connect(self._choose_model)
@@ -170,11 +315,12 @@ class LiveClassifierDashboard(QtWidgets.QWidget):
         bl.addWidget(self.model_label)
         lv.addWidget(box)
 
-        box = QtWidgets.QGroupBox("Run")
+        box = QtWidgets.QGroupBox("Classifier" if self.emg_producer else "Run")
+        self.classifier_boxes.append(box)
         bl = QtWidgets.QVBoxLayout(box)
         row = QtWidgets.QHBoxLayout()
-        self.btn_start = QtWidgets.QPushButton("Start")
-        self.btn_stop = QtWidgets.QPushButton("Stop")
+        self.btn_start = QtWidgets.QPushButton("Start classifier" if self.emg_producer else "Start")
+        self.btn_stop = QtWidgets.QPushButton("Stop classifier" if self.emg_producer else "Stop")
         self.btn_reset = QtWidgets.QPushButton("Reset buffer")
         for b in (self.btn_start, self.btn_stop, self.btn_reset):
             row.addWidget(b)
@@ -196,16 +342,40 @@ class LiveClassifierDashboard(QtWidgets.QWidget):
         self.log_dir_label.setWordWrap(True)
         bl.addWidget(self.log_dir_label)
         lv.addWidget(box)
+        stab_box = self._build_stabilization()
+        self.classifier_boxes.append(stab_box)
+        lv.addWidget(stab_box)
 
         box = QtWidgets.QGroupBox("Compatibility")
+        self.classifier_boxes.append(box)
         bl = QtWidgets.QVBoxLayout(box)
         self.compat_label = QtWidgets.QLabel()
         self.compat_label.setWordWrap(True)
         bl.addWidget(self.compat_label)
-        self.ack_check = QtWidgets.QCheckBox("I reviewed the warnings above (display-only test)")
+        self.ack_check = QtWidgets.QCheckBox("I reviewed the warnings above (Start only)")
+        self.ack_check.setToolTip("Allows classifying and logging with these warnings. Robot "
+                                  "output asks for its own acknowledgement.")
         self.ack_check.toggled.connect(self._update_controls)
         bl.addWidget(self.ack_check)
         lv.addWidget(box)
+        self.output_box = self._build_robot()
+        self.output_box.setVisible(not self.managed_output)
+        lv.addWidget(self.output_box)
+        if self.managed_output:
+            note = QtWidgets.QLabel(
+                "Robot start/pause, Manual/EMG selection and verified gains are in the "
+                "Robot control tab. Start the classifier here; EMG predictions are sent "
+                "automatically after you select EMG there.")
+            note.setWordWrap(True)
+            lv.addWidget(note)
+        self.gain_panel = None
+        if not self.emg_producer:
+            self.gain_panel = GainTablePanel(
+                self.store, lambda: (self.robot_host.text().strip(), self.robot_port.value()))
+            self.robot_host.textChanged.connect(self.gain_panel.target_changed)
+            self.robot_port.valueChanged.connect(self.gain_panel.target_changed)
+            self.gain_panel.busy_changed.connect(lambda _: self._update_robot_controls())
+            lv.addWidget(self.gain_panel)
 
         lv.addStretch(1)
 
@@ -215,23 +385,31 @@ class LiveClassifierDashboard(QtWidgets.QWidget):
         self.sim_label.setStyleSheet("background:#fff3e0; color:#b71c1c; padding:4px;")
         self.sim_label.setVisible(bool(getattr(self.source, "is_simulation", False)))
         right.addWidget(self.sim_label)
+        self.mode_label = LiveText(lines=1, px=14, bold=True, pad=4)
         self.s_label = LiveText(lines=1, px=88, bold=True, pad=12)
         self.class_label = LiveText(lines=1, px=28, bold=True, pad=6)
+        self.raw_label = LiveText(lines=1, px=16, pad=6)
         self.state_label = LiveText(lines=1, px=15, bold=True, pad=10)
+        self.stab_label = LiveText(lines=1, px=15, bold=True, pad=10)
         self.bars = ProbBars()
         self.soft_label = LiveText(lines=2, px=13, pad=6)
         head = QtWidgets.QHBoxLayout()
         col = QtWidgets.QVBoxLayout()
-        for w in (self.s_label, self.class_label):
+        for w in (self.mode_label, self.s_label, self.class_label, self.raw_label):
             col.addWidget(w)
         head.addLayout(col, 1)
         col = QtWidgets.QVBoxLayout()
-        for w in (self.bars, self.soft_label):
+        bars_title = LiveText(lines=1, px=13, pad=4)
+        bars_title.setText("<b>RAW</b> model probabilities (scores, not calibrated)")
+        for w in (bars_title, self.bars, self.soft_label):
             col.addWidget(w)
         col.addStretch(1)
         head.addLayout(col, 1)
         right.addLayout(head)
-        right.addWidget(self.state_label)
+        row = QtWidgets.QHBoxLayout()
+        row.addWidget(self.state_label, 1)
+        row.addWidget(self.stab_label, 1)
+        right.addLayout(row)
 
         self.plot = pg.PlotWidget()
         self.plot.setMenuEnabled(False)
@@ -240,31 +418,347 @@ class LiveClassifierDashboard(QtWidgets.QWidget):
         self.plot.showGrid(y=True, alpha=0.25)
         self.plot.setYRange(-0.1, 1.1, padding=0)
         self.plot.setXRange(-HISTORY_S, 0, padding=0)
-        self.plot.getAxis("left").setTicks([[(0, "0 low"), (0.5, "0.5 medium"), (1, "1 high")]])
+        self._show_classes(DEFAULT_CLASSES)
         self.plot.getAxis("bottom").enableAutoSIPrefix(False)
         self.plot.setLabel("bottom", "host receipt time of the newest window sample (s, 0 = now)")
-        self.plot.setTitle("History (raw model output; gaps = no valid prediction)")
-        self.plot.addLegend(offset=(10, 10))
-        self.s_curve = self.plot.plot(pen=pg.mkPen(S_COLOR, width=2), name="s (argmax class)")
+        self.plot.addLegend(offset=(10, 4), colCount=3)
+        self.stab_curve = self.plot.plot(pen=pg.mkPen(STAB_COLOR, width=4),
+                                         name="stabilized s")
+        self.s_curve = self.plot.plot(pen=pg.mkPen(S_COLOR, width=2, style=QtCore.Qt.DotLine),
+                                      name="raw s (argmax)")
         self.s_dots = pg.ScatterPlotItem(size=5, pen=None, brush=pg.mkBrush(S_COLOR))
         self.plot.addItem(self.s_dots)
         self.soft_curve = self.plot.plot(
             pen=pg.mkPen(SOFT_COLOR, width=2, style=QtCore.Qt.DashLine),
-            name="soft class score (not stiffness)")
+            name="raw soft score (not stiffness)")
+        self.mark_curve = self.plot.plot(pen=pg.mkPen(MARK_COLOR, width=1))
+        row = QtWidgets.QHBoxLayout()
+        row.addWidget(QtWidgets.QLabel("<b>History</b> · show:"))
+        self.show_raw = QtWidgets.QCheckBox("raw s")
+        self.show_stab = QtWidgets.QCheckBox("stabilized s")
+        self.show_soft = QtWidgets.QCheckBox("raw soft score")
+        for box, items in ((self.show_raw, (self.s_curve, self.s_dots)),
+                           (self.show_stab, (self.stab_curve,)),
+                           (self.show_soft, (self.soft_curve,))):
+            box.setChecked(True)
+            box.toggled.connect(lambda on, items=items: [i.setVisible(on) for i in items])
+            row.addWidget(box)
+        row.addStretch(1)
+        row.addWidget(QtWidgets.QLabel("<small>gaps = no output · grey = reset / settings "
+                                       "change · stabilized = raw when OFF</small>"))
+        self.history_controls = QtWidgets.QWidget()
+        self.history_controls.setLayout(row)
+        right.addWidget(self.history_controls)
         right.addWidget(self.plot, 1)
         box = QtWidgets.QGroupBox("Diagnostics (host-side)")
         bl = QtWidgets.QVBoxLayout(box)
-        self.diag_label = LiveText(lines=11, px=11, pad=6)
+        self.diag_label = LiveText(lines=12, px=11, pad=6)
         bl.addWidget(self.diag_label)
         right.addWidget(box)
         note = QtWidgets.QLabel(NOTE)
         note.setStyleSheet("color:#52514e; padding:4px; border-top:1px solid #e1e0d9;")
         right.addWidget(note)
+        self.classifier_visuals = [bars_title, self.bars, self.soft_label, self.history_controls,
+                                   self.plot, box, note]
+        self.manual_help = QtWidgets.QLabel(
+            "Manual commands use the same stiffness gain table as EMG commands.\n\n"
+            "Select a level and enable Send to robot, then arm the bridge.\n"
+            "Watch robot: applied s for confirmation; the selected level may still be waiting.\n\n"
+            "Uncheck Send to robot to stop requests. The hand keeps its last applied gains.\n"
+            "Switching back to EMG leaves the classifier and sending stopped.")
+        self.manual_help.setWordWrap(True)
+        self.manual_help.setAlignment(QtCore.Qt.AlignTop | QtCore.Qt.AlignLeft)
+        self.manual_help.setStyleSheet("padding:16px; color:#424242;")
+        self.manual_help.hide()
+        right.addWidget(self.manual_help, 1)
 
         layout = QtWidgets.QHBoxLayout(self)
         layout.addWidget(scroll)
         layout.addLayout(right, 1)
-        self._show_prediction(None, NO_MODEL, "", None)
+        self._show_prediction(None, NO_MODEL, "", None, None)
+
+    @property
+    def manual_mode(self) -> bool:
+        return self.robot.mode != robot_out.EMG
+
+    @property
+    def direct_mode(self) -> bool:
+        return self.robot.mode == robot_out.GAINS
+
+    def _build_source_mode(self):
+        box = QtWidgets.QGroupBox("Stiffness source")
+        layout = QtWidgets.QVBoxLayout(box)
+        self.source_mode = QtWidgets.QComboBox()
+        self.source_mode.addItem("EMG classifier", robot_out.EMG)
+        self.source_mode.addItem("Manual (classifier off)", robot_out.MANUAL)
+        self.source_mode.addItem("Manual Kp/Kd (classifier off)", robot_out.GAINS)
+        self.source_mode.currentIndexChanged.connect(self._source_mode_changed)
+        layout.addWidget(self.source_mode)
+        self.manual_controls = QtWidgets.QWidget()
+        controls = QtWidgets.QVBoxLayout(self.manual_controls)
+        controls.setContentsMargins(0, 0, 0, 0)
+        row = QtWidgets.QHBoxLayout()
+        self.manual_group = QtWidgets.QButtonGroup(self)
+        self.manual_buttons = {}
+        for level, label in ((0.0, "0 · Low"), (0.5, "0.5 · Medium"), (1.0, "1 · High")):
+            button = QtWidgets.QPushButton(label)
+            button.setCheckable(True)
+            button.setMinimumHeight(36)
+            button.clicked.connect(lambda _, s=level: self._select_manual(s))
+            self.manual_group.addButton(button)
+            self.manual_buttons[level] = button
+            row.addWidget(button)
+        controls.addLayout(row)
+        note = QtWidgets.QLabel(
+            "No band or model needed. Select a level, then enable Send to robot. "
+            "While sending, each selection requests that level. The robot may take time "
+            "to apply it; check its applied s below.")
+        note.setWordWrap(True)
+        controls.addWidget(note)
+        self.manual_controls.hide()
+        layout.addWidget(self.manual_controls)
+        self.direct_controls = QtWidgets.QWidget()
+        direct = QtWidgets.QVBoxLayout(self.direct_controls)
+        direct.setContentsMargins(0, 0, 0, 0)
+        form = QtWidgets.QFormLayout()
+        self.direct_kp, self.direct_kd = QtWidgets.QDoubleSpinBox(), QtWidgets.QDoubleSpinBox()
+        for name, widget, initial in (("Kp", self.direct_kp, .6),
+                                      ("Kd", self.direct_kd, .8)):
+            widget.setDecimals(4)
+            widget.setRange(0.0, 1.0)
+            widget.setSingleStep(.01)
+            # Typing updates only the draft; the sender changes only on Apply.
+            widget.setKeyboardTracking(True)
+            widget.setValue(initial)
+            widget.valueChanged.connect(self._direct_edited)
+            widget.lineEdit().textEdited.connect(self._direct_edited)
+            form.addRow(f"{name} baseline multiplier", widget)
+        direct.addLayout(form)
+        self.direct_apply = QtWidgets.QPushButton("Apply gains")
+        self.direct_apply.clicked.connect(self._apply_direct)
+        direct.addWidget(self.direct_apply)
+        self.direct_status = QtWidgets.QLabel()
+        self.direct_status.setWordWrap(True)
+        direct.addWidget(self.direct_status)
+        note = QtWidgets.QLabel(
+            "Scales each joint's baseline Kp and Kd; does not change the 0 / 0.5 / 1 presets. "
+            "Edit both fields, then click Apply gains. While Send to robot is on, this "
+            "requests the new pair. Each multiplier accepts 0–1 independently. "
+            "Check the applied multipliers in robot feedback. "
+            "Kp = 0 removes position stiffness; Kd = 0 removes damping. "
+            "Zero does not turn off the motors. Restore positive Kd before homing.")
+        note.setWordWrap(True)
+        direct.addWidget(note)
+        self.direct_controls.hide()
+        layout.addWidget(self.direct_controls)
+        self._direct_edited()
+        return box
+
+    def _direct_edited(self, *_):
+        if not all(w.hasAcceptableInput() for w in (self.direct_kp, self.direct_kd)):
+            self.direct_status.setText("Enter both multipliers between 0 and 1.")
+            self.direct_apply.setEnabled(False)
+            return
+        pair = self.direct_kp.value(), self.direct_kd.value()
+        try:
+            robot_out.validate_pair(*pair)
+        except ValueError as error:
+            self.direct_status.setText(str(error))
+            self.direct_apply.setEnabled(False)
+            return
+        selected = pair == self.robot.manual_gains
+        self.direct_apply.setEnabled(not selected)
+        self.direct_status.setText("Selected pair — see robot feedback for applied gains."
+                                   if selected else "Draft — click Apply gains to select this pair.")
+
+    def _apply_direct(self):
+        if not self.direct_mode or not all(
+                w.hasAcceptableInput() for w in (self.direct_kp, self.direct_kd)):
+            return
+        self.robot.select_gains(self.direct_kp.value(), self.direct_kd.value())
+        self._direct_edited()
+        self._shown = None
+        self._update_controls()
+        self.refresh()
+
+    def _source_mode_changed(self, _index):
+        if self.emg_producer:
+            # Hidden controls cannot turn the producer into a manual robot controller.
+            self.source_mode.blockSignals(True)
+            self.source_mode.setCurrentIndex(0)
+            self.source_mode.blockSignals(False)
+            return
+        # The old session sends stop before the new source can send anything.
+        self.disarm_robot("stiffness source changed")
+        self.engine.stop("stiffness source changed")
+        self.robot.set_mode(self.source_mode.currentData())
+        self.manual_group.setExclusive(False)
+        for button in self.manual_buttons.values():
+            button.setChecked(False)
+        self.manual_group.setExclusive(True)
+        self.manual_controls.setVisible(self.robot.mode == robot_out.MANUAL)
+        self.direct_controls.setVisible(self.direct_mode)
+        self._direct_edited()
+        self.manual_help.setText(
+            ("Manual Kp/Kd scales the joint-specific baseline gains.\n\n"
+             "Click Apply gains to select a pair, enable Send to robot, then arm the bridge.\n"
+             "You can edit and apply another pair while sending stays on.\n"
+             "Watch robot: applied Kp/Kd for readback confirmation.\n\n"
+             if self.direct_mode else
+             "Manual levels use the same stiffness gain table as EMG commands.\n\n"
+             "Select a level, enable Send to robot, then arm the bridge.\n"
+             "Watch robot: applied s for readback confirmation.\n\n")
+            + "Uncheck Send to robot to stop requests. The hand keeps its last applied gains.\n"
+              "Switching sources stops sending and requires a new session and bridge re-arm.")
+        for box in self.classifier_boxes:
+            box.setVisible(not self.manual_mode)
+        for widget in self.classifier_visuals:
+            widget.setVisible(not self.manual_mode)
+        self.manual_help.setVisible(self.manual_mode)
+        self.sim_label.setVisible(not self.manual_mode and self.robot.simulated)
+        self._shown = None
+        self._update_controls()
+        self.refresh()
+
+    def _select_manual(self, level):
+        self.robot.select_manual(level)
+        self._shown = None
+        self._update_controls()
+        self.refresh()
+
+    def _build_stabilization(self) -> QtWidgets.QGroupBox:
+        box = QtWidgets.QGroupBox("Output stabilization")
+        bl = QtWidgets.QVBoxLayout(box)
+        stale_ms = self._stale_ms
+
+        def spin(lo, hi, tip, step=10):
+            w = QtWidgets.QSpinBox()
+            w.setRange(lo, hi)
+            w.setSingleStep(step)
+            w.setSuffix(" ms")
+            w.setToolTip(tip)
+            w.valueChanged.connect(self._on_stab_edit)
+            return w
+
+        def dspin(tip):
+            w = QtWidgets.QDoubleSpinBox()
+            w.setRange(0.0, 1.0)
+            w.setDecimals(2)
+            w.setSingleStep(0.01)
+            w.setToolTip(tip)
+            w.valueChanged.connect(self._on_stab_edit)
+            return w
+
+        self.stab_enable = QtWidgets.QCheckBox("Enable stabilization")
+        self.stab_enable.setToolTip(TIPS["enable"])
+        self.stab_enable.toggled.connect(self._on_stab_edit)
+        bl.addWidget(self.stab_enable)
+        form = QtWidgets.QFormLayout()
+        self.stab_up = spin(0, 1000, TIP_CONFIRM.format(d="higher-s"))
+        self.stab_down = spin(0, 1000, TIP_CONFIRM.format(d="lower-s"))
+        form.addRow("Upward confirmation", self.stab_up)
+        form.addRow("Downward confirmation", self.stab_down)
+        bl.addLayout(form)
+        row = QtWidgets.QHBoxLayout()
+        self.btn_stab_apply = QtWidgets.QPushButton("Apply settings")
+        self.btn_stab_defaults = QtWidgets.QPushButton("Restore defaults")
+        self.btn_stab_reset = QtWidgets.QPushButton("Reset state")
+        self.btn_stab_defaults.setToolTip(TIPS["defaults"])
+        self.btn_stab_reset.setToolTip(TIPS["reset"])
+        self.btn_stab_apply.clicked.connect(self.apply_stabilization)
+        self.btn_stab_defaults.clicked.connect(self.restore_stabilization_defaults)
+        self.btn_stab_reset.clicked.connect(
+            lambda: self.engine.reset_stabilization("user_stabilization_reset"))
+        for b in (self.btn_stab_apply, self.btn_stab_defaults, self.btn_stab_reset):
+            row.addWidget(b)
+        bl.addLayout(row)
+        self.stab_draft_label = QtWidgets.QLabel()
+        self.stab_draft_label.setWordWrap(True)
+        bl.addWidget(self.stab_draft_label)
+
+        self.btn_stab_advanced = QtWidgets.QToolButton()
+        self.btn_stab_advanced.setText("Advanced")
+        self.btn_stab_advanced.setCheckable(True)
+        self.btn_stab_advanced.setToolButtonStyle(QtCore.Qt.ToolButtonTextBesideIcon)
+        self.btn_stab_advanced.setArrowType(QtCore.Qt.RightArrow)
+        self.btn_stab_advanced.setAutoRaise(True)
+        bl.addWidget(self.btn_stab_advanced)
+        self.stab_advanced = QtWidgets.QWidget()
+        form = QtWidgets.QFormLayout(self.stab_advanced)
+        form.setContentsMargins(12, 0, 0, 0)
+        self.stab_startup = spin(0, 1000, TIPS["startup"])
+        self.stab_gate = QtWidgets.QCheckBox("Enable probability gate")
+        self.stab_gate.setToolTip(TIPS["gate"])
+        self.stab_gate.toggled.connect(self._on_stab_edit)
+        self.stab_minp = dspin(TIPS["minp"])
+        self.stab_margin = dspin(TIPS["margin"])
+        self.stab_gap = spin(1, stale_ms, TIPS["gap"])
+        self.stab_hold = spin(100, 10000, TIPS["hold"], step=100)
+        form.addRow("Startup confirmation", self.stab_startup)
+        form.addRow(self.stab_gate)
+        form.addRow("Min. candidate probability", self.stab_minp)
+        form.addRow("Min. probability margin", self.stab_margin)
+        form.addRow("Max. evidence gap", self.stab_gap)
+        form.addRow("Max. unsupported hold", self.stab_hold)
+        self.stab_advanced.setVisible(False)
+        self.btn_stab_advanced.toggled.connect(self._toggle_advanced)
+        bl.addWidget(self.stab_advanced)
+        return box
+
+    def _build_robot(self) -> QtWidgets.QGroupBox:
+        box = QtWidgets.QGroupBox("Prediction stream (UDP)" if self.emg_producer
+                                 else "Robot output (UDP)")
+        bl = QtWidgets.QVBoxLayout(box)
+        if self.emg_producer:
+            self.producer_note = QtWidgets.QLabel(
+                "This app publishes EMG activation predictions only. Robot start/stop, "
+                "arming, manual gains and applied-gain status are in Sharpa Control. "
+                "Manual robot control works without this app.")
+            self.producer_note.setWordWrap(True)
+            bl.addWidget(self.producer_note)
+        cfg = self.robot.settings
+        form = QtWidgets.QFormLayout()
+        self.robot_host = QtWidgets.QLineEdit(cfg.host)
+        self.robot_host.setPlaceholderText("127.0.0.1")
+        self.robot_host.setToolTip(
+            "IP address of the Sharpa Control prediction receiver." if self.emg_producer
+            else TIPS["robot_host"])
+        self.robot_port = QtWidgets.QSpinBox()
+        self.robot_port.setRange(1, 65535)
+        self.robot_port.setValue(cfg.port)
+        self.robot_port.setToolTip(TIPS["robot_port"])
+        self.robot_host.textChanged.connect(self._update_controls)
+        self.robot_port.valueChanged.connect(self._update_controls)
+        self.robot_host.editingFinished.connect(self._save_robot_target)
+        self.robot_port.editingFinished.connect(self._save_robot_target)
+        form.addRow("Receiver IP" if self.emg_producer else "Robot IP", self.robot_host)
+        form.addRow("UDP port", self.robot_port)
+        bl.addLayout(form)
+        self.robot_ack = QtWidgets.QCheckBox(
+            "Send predictions despite warnings / simulator" if self.emg_producer
+            else "Send despite the warnings / simulator")
+        self.robot_ack.setToolTip(TIPS["robot_ack"])
+        self.robot_ack.toggled.connect(self._update_controls)
+        bl.addWidget(self.robot_ack)
+        self.robot_check = QtWidgets.QCheckBox(
+            "Send predictions" if self.emg_producer else "Send to robot")
+        self.robot_check.setToolTip(
+            "Publish the displayed classifier level over UDP. This does not start or arm "
+            "robot control. Uncheck to stop the prediction stream; Sharpa Control handles "
+            "the robot response." if self.emg_producer else TIPS["robot_send"])
+        self.robot_check.toggled.connect(self._on_robot_toggled)
+        bl.addWidget(self.robot_check)
+        self.robot_hint = QtWidgets.QLabel()
+        self.robot_hint.setWordWrap(True)
+        bl.addWidget(self.robot_hint)
+        if self.emg_producer:
+            self.robot_status = QtWidgets.QLabel()
+            self.robot_status.setWordWrap(True)
+            self.robot_status.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
+        else:
+            self.robot_status = LiveText(lines=3, px=11, pad=6)
+        bl.addWidget(self.robot_status)
+        return box
 
     # -- model --------------------------------------------------------------------
     def _choose_model(self):
@@ -281,6 +775,7 @@ class LiveClassifierDashboard(QtWidgets.QWidget):
 
     def load_model_file(self, path):
         """Load in the background. The caller has confirmed the file is trusted."""
+        self.disarm_robot("model load")          # first: no datagram from the new state
         self.engine.set_model(None)              # stops and invalidates any current run
         self.model, self.report, self.load_error = None, None, ""
         self.ack_check.setChecked(False)
@@ -307,6 +802,12 @@ class LiveClassifierDashboard(QtWidgets.QWidget):
     def loading(self) -> bool:
         return self._loading is not None
 
+    def _show_classes(self, classes):
+        """Bars, history ticks and the soft-score formula follow the model's classes."""
+        self.bars.set_labels([l for _, l, _ in classes])
+        self.plot.getAxis("left").setTicks([[(s, f"{s:g} {l}") for _, l, s in classes]])
+        self._soft_formula = " + ".join(f"{s:g}·p_{l}" for _, l, s in classes)
+
     def _on_model_loaded(self, result, token: int):
         if token != self._load_token or self._closed:
             return
@@ -317,6 +818,7 @@ class LiveClassifierDashboard(QtWidgets.QWidget):
             try:
                 self.engine.set_model(result)
                 self.model = result
+                self._show_classes(result.classes)
             except ValueError as e:
                 self.load_error = str(e)
         self._show_model()
@@ -331,8 +833,10 @@ class LiveClassifierDashboard(QtWidgets.QWidget):
             html = (f"<b>{m.name}</b> · sha256 {m.sha256[:16]}<br><code>{m.path}</code><br>"
                     f"window {m.window_samples} samples / {m.hop_samples}-sample hop · "
                     f"{len(m.channel_names)} × {m.feature.get('name')} "
-                    f"v{m.feature.get('version')} ({', '.join(m.channel_names[:1])}…"
-                    f"{m.channel_names[-1]})<br>"
+                    f"v{m.feature.get('version')} ({', '.join(m.channel_names)}"
+                    + ("; not used: " + ", ".join(c for c in HUB_CHANNELS
+                                                 if c not in m.channel_names)
+                       if len(m.channel_names) < len(HUB_CHANNELS) else "") + ")<br>"
                     f"classes {', '.join(f'{c}={l} (s={s:g})' for c, l, s in m.classes)}<br>"
                     f"fitted on {m.training.get('n_trials')} trials / "
                     f"{m.training.get('n_windows')} windows · scikit-learn "
@@ -359,11 +863,15 @@ class LiveClassifierDashboard(QtWidgets.QWidget):
         self._recheck()
 
     def _on_disconnected(self):
+        if not self.manual_mode:
+            self.disarm_robot("band disconnected")
         self._device, self._params = {}, {}
         self._recheck()
 
     def _on_state(self, _signalled=""):
         state = self.source.state                # queued signals may arrive out of order
+        if state != STREAMING and not self.manual_mode:  # manual needs no band
+            self.disarm_robot(f"band {state}")   # output never re-arms by itself
         if self.engine.running:
             if state in (IDLE, FAILED, DISCONNECTING):
                 self.stop("disconnected")
@@ -388,6 +896,7 @@ class LiveClassifierDashboard(QtWidgets.QWidget):
         if key != self._ack_key:
             self._ack_key = key
             self.ack_check.setChecked(False)     # any live change needs a new review
+            self.robot_ack.setChecked(False)     # (robot output: its own, also cleared)
         self._show_compat()
         self._update_controls()
 
@@ -411,6 +920,8 @@ class LiveClassifierDashboard(QtWidgets.QWidget):
 
     def start_blockers(self) -> list:
         out = []
+        if self.manual_mode:
+            out.append("switch to EMG classifier mode")
         if self.loading:
             out.append("model loading")
         elif self.model is None:
@@ -427,6 +938,7 @@ class LiveClassifierDashboard(QtWidgets.QWidget):
         return out
 
     def _update_controls(self, *_):
+        self._robot_guard()
         running = self.engine.running
         r = self.report
         _set_enabled(self.btn_start, not self.start_blockers())
@@ -437,10 +949,348 @@ class LiveClassifierDashboard(QtWidgets.QWidget):
                      and not running)
         _set_enabled(self.log_check, not running)
         _set_enabled(self.btn_log_dir, not running)
+        _set_enabled(self.btn_stab_reset, running)
         blockers = [b for b in self.start_blockers() if b != "running"]
         text = (f"<span style='color:#c62828'>{self.start_error}</span>" if self.start_error
                 else "" if running or not blockers else "Start needs: " + " · ".join(blockers))
         self.blocker_label.setText(f"<div align='left'>{text}</div>" if text else "")
+        self._update_robot_controls()
+
+    # -- output stabilization -----------------------------------------------------------
+    @property
+    def _stale_ms(self) -> int:
+        return int(round(self.engine.settings.stale_s * 1000))
+
+    def _toggle_advanced(self, on: bool):
+        self.btn_stab_advanced.setArrowType(QtCore.Qt.DownArrow if on else QtCore.Qt.RightArrow)
+        self.stab_advanced.setVisible(on)
+
+    def stab_draft(self) -> StabilizerSettings:
+        """The settings in the controls (not yet active)."""
+        return StabilizerSettings(
+            enabled=self.stab_enable.isChecked(), up_ms=self.stab_up.value(),
+            down_ms=self.stab_down.value(), startup_ms=self.stab_startup.value(),
+            gate=self.stab_gate.isChecked(), min_probability=round(self.stab_minp.value(), 2),
+            min_margin=round(self.stab_margin.value(), 2), max_gap_ms=self.stab_gap.value(),
+            max_unsupported_ms=self.stab_hold.value())
+
+    def _set_stab_controls(self, st: StabilizerSettings, keep_enabled: bool = False):
+        widgets = (self.stab_enable, self.stab_up, self.stab_down, self.stab_startup,
+                   self.stab_gate, self.stab_minp, self.stab_margin, self.stab_gap,
+                   self.stab_hold)
+        for w in widgets:
+            w.blockSignals(True)
+        if not keep_enabled:
+            self.stab_enable.setChecked(st.enabled)
+        self.stab_up.setValue(st.up_ms)
+        self.stab_down.setValue(st.down_ms)
+        self.stab_startup.setValue(st.startup_ms)
+        self.stab_gate.setChecked(st.gate)
+        self.stab_minp.setValue(st.min_probability)
+        self.stab_margin.setValue(st.min_margin)
+        self.stab_gap.setValue(st.max_gap_ms)
+        self.stab_hold.setValue(st.max_unsupported_ms)
+        for w in widgets:
+            w.blockSignals(False)
+        self._on_stab_edit()
+
+    @property
+    def stab_dirty(self) -> bool:
+        return self.stab_draft() != self.engine.stabilizer_settings
+
+    def _on_stab_edit(self, *_):
+        draft = self.stab_draft()
+        errors = draft.errors(self._stale_ms)
+        active = self.engine.stabilizer_settings
+        dirty = draft != active
+        _set_enabled(self.btn_stab_apply, dirty and not errors)
+        if errors:
+            head = "<span style='color:#c62828'><b>Invalid:</b> " + "; ".join(errors) + "</span>"
+        elif dirty:
+            head = ("<span style='color:#ef6c00'><b>Unapplied changes</b> — click "
+                    "<i>Apply settings</i> to use them.</span>")
+        else:
+            head = "No unapplied changes."
+        note = f"<br><span style='color:#ef6c00'>{self.stab_note}</span>" if self.stab_note else ""
+        html = (f"{head}<br><small>Active (rev {self.engine.stabilizer_revision}): "
+                f"{_summary(active)}</small>{note}")
+        if self.stab_draft_label.text() != html:
+            self.stab_draft_label.setText(html)
+
+    def apply_stabilization(self) -> bool:
+        """Make the draft active (atomic, new revision, state cleared) and persist it.
+        Classification, the model and any recording keep running; robot output disarms
+        (also when switching stabilization off): the robot never gets the new meaning of s
+        without a new arm."""
+        draft = self.stab_draft()
+        try:
+            if not draft.errors(self._stale_ms):
+                self.disarm_robot("stabilization settings applied")   # before they change
+            self.engine.set_stabilization(draft)
+        except ValueError as e:
+            self.stab_note = f"Not applied: {e}"
+            self._on_stab_edit()
+            return False
+        save_stabilization(self.store, draft)
+        self.stab_note = ""
+        self._shown = None
+        self._on_stab_edit()
+        return True
+
+    def restore_stabilization_defaults(self):
+        """Defaults into the draft controls (Enable kept); Apply makes them active."""
+        self._set_stab_controls(StabilizerSettings(), keep_enabled=True)
+
+    # -- robot output (GUI thread; the sender thread never touches widgets) ------------
+    def robot_draft(self) -> RobotOutputSettings:
+        """The target in the controls (the send rate is kept from the settings)."""
+        return RobotOutputSettings(self.robot_host.text().strip(), self.robot_port.value(),
+                                   self.robot.settings.rate_hz)
+
+    def _robot_needs_ack(self) -> bool:
+        r = self.report
+        return not self.managed_output and not self.manual_mode and r is not None and not r.blocking and (
+            bool(r.needs_ack) or self.robot.simulated)
+
+    def robot_blockers(self) -> list:
+        """Why 'Send to robot' cannot be armed now ([] = it can)."""
+        out = []
+        if self.manual_mode:
+            if self.direct_mode and self.robot.manual_gains is None:
+                out.append("click Apply gains to select a Kp/Kd pair")
+            elif not self.direct_mode and self.robot.manual_level is None:
+                out.append("select a manual stiffness level")
+            if self.engine.running:
+                out.append("stop the classifier")
+            if self.robot_draft().errors():
+                out.append("a valid robot IP and port")
+            if self.robot.armed:
+                out.append("armed")
+            return out
+        if self.loading:
+            out.append("model loading")
+        elif self.model is None:
+            out.append("load a model")
+        if self.source.state != STREAMING:
+            out.append("connect the band (streaming)")
+        if not self.engine.running:
+            out.append("start the classifier")
+        r = self.report
+        if r is not None and r.blocking:
+            out.append("incompatible settings (see Compatibility)")
+        elif self._robot_needs_ack() and not self.robot_ack.isChecked():
+            out.append(f"tick '{self.robot_ack.text()}'")
+        if self.robot_draft().errors():
+            out.append("a valid robot IP and port")
+        if self.robot.armed:
+            out.append("armed")
+        return out
+
+    def robot_hints(self) -> list:
+        """What the robot bridge ignores with its defaults (it decides; the UI still sends)."""
+        if self.manual_mode:
+            return ["Manual commands need accept_test_sender:=true on the bridge. "
+                    "Robot-side arming and write checks still apply."]
+        st = self.engine.stabilizer_settings
+        out = []
+        if not st.enabled:
+            out.append("robot will ignore: stabilization OFF")
+        elif min(st.up_ms, st.down_ms, st.startup_ms) < ROBOT_MIN_CONFIRM_MS:
+            out.append(f"robot will ignore: a confirmation below {ROBOT_MIN_CONFIRM_MS} ms")
+        if self.robot.simulated:
+            out.append("robot will ignore: simulated (synthetic EMG)")
+        if self.emg_producer:
+            out.append("Robot control and applied gains are shown in Sharpa Control.")
+        return out
+
+    def _on_robot_toggled(self, on: bool):
+        if on:
+            self.arm_robot()
+        else:
+            self.disarm_robot("operator")
+        self._robot_changed()                     # the box always shows the real state
+
+    def _confirm_robot(self, cfg: RobotOutputSettings) -> bool:
+        acked = ""
+        explanation = ROBOT_CONFIRM
+        if self.emg_producer:
+            explanation = (
+                f"Publish the displayed {' / '.join(self.bars.labels)} activation prediction. "
+                "Sharpa Control owns robot arming, gain selection and applied-gain status. "
+                "Starting this stream does not start robot control. A successful UDP send "
+                "does not confirm that the controller received or applied a prediction.")
+        elif self.direct_mode:
+            kp, kd = self.robot.manual_gains
+            explanation = (
+                f"MANUAL Kp/Kd: baseline multipliers Kp × {kp:g}, Kd × {kd:g}. "
+                "The classifier is off. Each click of Apply gains while sending requests "
+                "the selected pair. This can write real hand gains when the bridge is armed "
+                "with dry_run=false and accept_test_sender=true. The bridge's hold times, "
+                "rate limits and hardware checks still apply. Stopping output holds the "
+                "last gains; it does not disable the hand.")
+        elif self.manual_mode:
+            explanation = (
+                f"MANUAL mode: selected s = {self.robot.manual_level:g}. The classifier is off; "
+                "no band is needed. These are operator commands that can change real hand "
+                "gains when the bridge is armed with dry_run=false and accept_test_sender=true. "
+                "Each button change is held for 100 ms before sending its value; the bridge's "
+                "hold times, rate limits and hardware checks still apply. Uncheck Send to robot "
+                "to stop output; stopping holds the last gains, it does not disable the hand.")
+        if self._robot_needs_ack():
+            items = [c.label for c in self.report.needs_ack]
+            items += ["simulated source"] if self.robot.simulated else []
+            acked = "\n\nAcknowledged: " + ", ".join(items) + "."
+        prompt = (f"Publish classifier predictions to {cfg.target} (UDP, {cfg.rate_hz} Hz)?"
+                  if self.emg_producer else
+                  f"Send the shown stiffness command to the robot bridge at {cfg.target} (UDP, "
+                  f"{cfg.rate_hz} Hz + each change)?")
+        answer = QtWidgets.QMessageBox.question(
+            self, "Send predictions?" if self.emg_producer else "Send to robot?",
+            f"{prompt}\n\n{explanation}{acked}",
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No, QtWidgets.QMessageBox.No)
+        return answer == QtWidgets.QMessageBox.Yes
+
+    def arm_robot(self) -> bool:
+        """Start sending after the operator confirmed the target (dialog). Never blocks
+        apart from the dialog; True if armed."""
+        if self.robot.armed:
+            return True
+        if self.robot_blockers():
+            self._robot_changed()
+            return False
+        cfg = self.robot_draft()
+        ok = self._confirm_robot(cfg) and not self.robot_blockers()   # the dialog ran the
+        if ok:                                                        # event loop: recheck
+            try:
+                self.robot.configure(cfg)
+                self.robot.arm()
+                self.robot_note = ""
+            except (OSError, RuntimeError, ValueError) as e:
+                ok = False
+                self.robot_note = f"Not armed: {type(e).__name__}: {e}"
+        if ok:
+            self._save_robot_target()
+        self._robot_changed()
+        return ok
+
+    def disarm_robot(self, reason: str) -> bool:
+        """Signal the sender (it sends 'stop' itself); never blocks. False if not armed."""
+        if not self.robot.disarm(reason):
+            return False
+        self._robot_changed()
+        return True
+
+    def _robot_guard(self):
+        """Safety net for paths without their own disarm or that race it (e.g. the engine
+        stopped itself, the source state changed on its thread, the robot acknowledgement
+        was cleared, the sender thread ended)."""
+        if not self.robot.armed:
+            return
+        state = self.source.state
+        if not self.robot.stats()["active"]:
+            why = "sender thread ended"
+        elif not self.manual_mode and state != STREAMING:
+            why = f"band {state}"
+        elif not self.manual_mode and not self.engine.running:
+            snap = self.engine.snapshot()
+            why = f"classifier stopped: {snap.reason or snap.state}"
+        else:
+            lost = [b for b in self.robot_blockers() if b != "armed"]
+            why = "arming condition lost: " + ", ".join(lost) if lost else ""
+        if why:
+            self.disarm_robot(why)
+
+    def robot_tick(self):
+        """Every status tick, on any tab (MainWindow): guard, status line, indicator."""
+        self._robot_guard()
+        self._show_robot()
+        self._emit_robot()
+
+    def _save_robot_target(self):
+        """Persist a valid target (IP, port, rate); the armed state is never stored."""
+        cfg = self.robot_draft()
+        if cfg.errors():
+            return
+        robot_out.save_settings(self.store, cfg)
+
+    def _emit_robot(self):
+        key = (self.robot.armed, self.robot.settings.target)
+        if key != self._robot_signalled:
+            self._robot_signalled = key
+            self.robot_armed.emit(*key)
+
+    def _robot_changed(self):
+        armed = self.robot.armed
+        if self.robot_check.isChecked() != armed:
+            self.robot_check.blockSignals(True)
+            self.robot_check.setChecked(armed)
+            self.robot_check.blockSignals(False)
+        self._update_robot_controls()
+        self._show_robot()
+        self._emit_robot()
+
+    def _update_robot_controls(self):
+        armed = self.robot.armed
+        config_busy = bool(getattr(self, "gain_panel", None) and self.gain_panel.busy)
+        if getattr(self, "gain_panel", None) is not None:
+            self.gain_panel.set_output_active(armed)
+        blockers = [b for b in self.robot_blockers() if b != "armed"]
+        _set_enabled(self.robot_check, armed or (not blockers and not config_busy))
+        _set_enabled(self.robot_host, not armed and not config_busy)
+        _set_enabled(self.robot_port, not armed and not config_busy)
+        _set_enabled(self.robot_ack, self._robot_needs_ack() and not armed)
+        self.robot_ack.setVisible(not self.manual_mode)
+        lines = []
+        errors = self.robot_draft().errors()
+        if errors:
+            lines.append("<span style='color:#c62828'>" + _esc("; ".join(errors)) + "</span>")
+        if blockers and not armed:
+            action = "Send predictions" if self.emg_producer else "Send to robot"
+            lines.append(action + " needs: " + " · ".join(blockers))
+        lines += [f"<span style='color:#ef6c00'>⚠ {h}</span>" for h in self.robot_hints()]
+        if self.robot_note:
+            lines.append(f"<span style='color:#ef6c00'>{_esc(self.robot_note)}</span>")
+        text = "<br>".join(lines)
+        if self.robot_hint.text() != text:
+            self.robot_hint.setText(text)
+
+    def _show_robot(self):
+        st = self.robot.stats()
+        if self.emg_producer:
+            state = "ON" if st["armed"] else "OFF"
+            lines = [f"Prediction stream {state} → {st['target']}",
+                     f"UDP datagrams sent {st['sent']} · send errors {st['errors']}"]
+            lines.append("Controller feedback received. Robot status: Sharpa Control."
+                         if st["robot"] is not None else
+                         "No fresh controller feedback. UDP sending does not confirm receipt.")
+            if st["last_error"]:
+                lines.append(_esc(st["last_error"]))
+            self.robot_status.setText("<br>".join(lines))
+            return
+        if st["armed"]:
+            head = (f"<b style='color:#c62828'>SENDING</b> → {st['target']} · sent {st['sent']}"
+                    f" · errors {st['errors']}"
+                    + (" · manual Kp/Kd" if self.direct_mode
+                       else f" · last s {_fmt_s(st['last_s'])}"))
+        elif st["session"] is None:
+            head = "Not sending"
+        else:
+            head = (f"Not sending · last session: sent {st['sent']} · errors {st['errors']} · "
+                    f"stopped ({_esc(st['stop_reason'])})")
+        r = st["robot"]
+        if r is None:
+            robot = "robot state unknown"
+        else:
+            applied = (f"Kp × {_fmt_s(r.get('kp_ratio'))}, Kd × {_fmt_s(r.get('kd_ratio'))}"
+                       if self.direct_mode else f"s {_fmt_s(r['applied_s'])}")
+            robot = (f"robot: applied {applied} · phase {_esc(r['phase'])} · "
+                     f"{'armed' if r['armed'] else 'disarmed'} · "
+                     f"{'dry run' if r['dry_run'] else 'gain writes ON'}"
+                     + (" · <b>latched</b>" if r["latched"] else ""))
+        detail = (_esc(r["detail"]) if r is not None and r["detail"]
+                  else _esc(st["last_error"]) if st["errors"] else "")
+        lines = [head, robot] + ([f"<small>{detail}</small>"] if detail else [])
+        self.robot_status.setText("<div align='left'>" + "<br>".join(lines) + "</div>")
 
     # -- run control ------------------------------------------------------------------
     def _choose_log_root(self):
@@ -473,7 +1323,10 @@ class LiveClassifierDashboard(QtWidgets.QWidget):
             "settings": asdict(self.engine.settings),
             "window": {"samples": m.window_samples, "hop_samples": m.hop_samples,
                        "units": "samples"},
-            "output": "raw model output: no smoothing, voting, rest gate or thresholds",
+            "output": ("predictions.csv: raw model output (no smoothing, voting, rest gate or "
+                       "thresholds). Display: raw output, or the stabilized command while "
+                       "stabilization is ON (stabilization.csv; changes in events.csv)"),
+            "stabilization": self.engine.stabilization_info(),
             "labels": "none: no ground truth is recorded or inferred",
             "note": NOTE.replace("\n", " "),
         }
@@ -494,12 +1347,18 @@ class LiveClassifierDashboard(QtWidgets.QWidget):
         return True
 
     def stop(self, reason: str = "user_stop"):
+        self.disarm_robot(f"classifier stopped: {reason}")
         self.engine.stop(reason)                 # also closes the prediction log
         self._update_controls()
 
     def shutdown(self):
-        """App close: stop classifying, let the threads exit, ignore late model loads."""
+        """App close: robot output first (its sender's last datagram is 'stop'; bounded
+        wait), then stop classifying, let the threads exit, ignore late model loads."""
         self._closed = True
+        if self.gain_panel is not None:
+            self.gain_panel.close_client()
+        self.robot.close(ROBOT_CLOSE_S, "app closed")
+        self._robot_changed()
         self.engine.shutdown()
 
     # -- refresh (GUI thread, visible tab only) ------------------------------------------
@@ -510,17 +1369,23 @@ class LiveClassifierDashboard(QtWidgets.QWidget):
         now = self._clock()
         snap = self.engine.snapshot()
         cur = snap.current(now)
+        stab = snap.stable(now)
         state = STALE if snap.state == RUNNING and cur is None else snap.state
         drew = False
-        key = (snap.version, cur.pred_id if cur else None, state, self.loading)
+        key = (snap.version, cur.pred_id if cur else None, state, self.loading,
+               stab is not None, self.robot.mode, self.robot.manual_level, self.robot.manual_gains)
         if key != self._shown:
             self._shown = key
-            self._show_prediction(cur, state, snap.reason, snap)
+            self._show_prediction(cur, state, snap.reason, snap, stab)
             if cur is not None and cur.pred_id != self._applied_id:
                 self._applied_id = cur.pred_id
                 ms = cur.age(now) * 1000
                 self._t_gui.append(ms)
-                self.engine.log_display(cur.pred_id, now, ms)
+                st = snap.stabilization
+                on = st.enabled
+                shown = (stab.accepted if stab is not None else "") if on else cur.prediction.label
+                self.engine.log_display(cur.pred_id, now, ms, "stabilized" if on else "raw",
+                                        st.revision, shown)
             drew = True
         if (snap.version != self._hist_version or self.engine.running) \
                 and now - self._hist_t >= 0.1:
@@ -531,32 +1396,84 @@ class LiveClassifierDashboard(QtWidgets.QWidget):
             self._diag_t = now
             self._show_diagnostics(now, snap, cur)
             self._update_controls()
+            self._show_robot()
             drew = True
         if drew:
             self.redraw_count += 1
         return drew
 
-    def _show_prediction(self, cur, state: str, reason: str, snap):
+    def _show_prediction(self, cur, state: str, reason: str, snap, stab):
+        if self.manual_mode:
+            level = self.robot.manual_level
+            self.mode_label.setText("Manual selection · classifier OFF")
+            if self.direct_mode:
+                pair = self.robot.manual_gains
+                self.s_label.setText(
+                    f"<span style='font-size:40px'>Kp × {pair[0]:g}<br>Kd × {pair[1]:g}</span>"
+                    if pair else "<span style='font-size:40px'>Kp / Kd = --</span>")
+                self.class_label.setText("BASELINE MULTIPLIERS")
+                self.raw_label.setText("Selected pair · see robot applied multipliers for readback")
+            else:
+                self.s_label.setText(f"s = {level:g}" if level is not None else "s = --")
+                self.class_label.setText({0.0: "LOW", 0.5: "MEDIUM", 1.0: "HIGH"}.get(level, "--"))
+                self.raw_label.setText("Selected command · see robot applied s for readback")
+            self.state_label.setText("Manual mode · no EMG required")
+            self.state_label.setColors("#1565c0", "white")
+            self.stab_label.setText("Button confirmation: 100 ms")
+            self.stab_label.setColors("#1565c0", "white")
+            self.bars.set_probabilities(None)
+            self.soft_label.setText("Classifier off · no scores")
+            return
         p = cur.prediction if cur is not None else None
-        self.s_label.setText(f"s = {p.s_discrete:g}" if p is not None else "s = --")
-        self.class_label.setText(p.label.upper() if p is not None else "--")
+        st = snap.stabilization if snap is not None else None
+        on = st is not None and st.enabled
+        if on:
+            self.mode_label.setText("Stabilized command")
+            self.s_label.setText(f"s = {stab.s:g}" if stab is not None else "s = --")
+            self.class_label.setText(stab.accepted.upper() if stab is not None else "--")
+            self.raw_label.setText(f"Raw: {p.label.upper()} (s = {p.s_discrete:g})"
+                                   if p is not None else "Raw: --")
+        else:
+            self.mode_label.setText("Raw output — stabilization OFF")
+            self.s_label.setText(f"s = {p.s_discrete:g}" if p is not None else "s = --")
+            self.class_label.setText(p.label.upper() if p is not None else "--")
+            self.raw_label.setText("")
         label = "LOADING MODEL" if self.loading else state.replace("_", " ")
         if state == WARMING_UP and snap is not None:
             label += f" · {snap.warm[0]}/{snap.warm[1]} samples"
         if reason and state != RUNNING:
             label += f" · {reason}"
-        self.state_label.setText(label)
+        self.state_label.setText("Input / engine: " + label)
         self.state_label.setColors(STATE_COLORS.get(state, "#757575"), "white")
+        if st is None:
+            text, status = "Stabilization: --", OFF
+        else:
+            text, status = describe(st), st.status
+            if on and st.accepted is not None and stab is None:
+                text, status = "Output unavailable: no fresh evidence", UNSUPPORTED
+        self.stab_label.setText(("Stabilization: " if on else "") + text)
+        self.stab_label.setColors(STAB_COLORS.get(status, "#757575"), "white")
         self.bars.set_probabilities(p.probabilities if p is not None else None)
         self.soft_label.setText(
-            f"soft class score {p.s_expected:.2f}<br><small>0·p_low + 0.5·p_medium + 1·p_high; "
+            f"soft class score {p.s_expected:.2f}<br><small>{self._soft_formula}; "
             f"not stiffness, not a confidence</small>" if p is not None
             else "soft class score --")
 
     def _draw_history(self, now: float):
+        lo = now - HISTORY_S - 1
+        sh, marks = self.engine.stabilized_history()
+        sh = sh[sh[:, 0] >= lo]
+        if len(sh):
+            t = sh[:, 0] - now
+            self.stab_curve.setData(np.repeat(t, 2)[1:], np.repeat(sh[:, 1], 2)[:-1],
+                                    connect="finite")
+        else:
+            self.stab_curve.setData([], [])
+        m = marks[marks >= lo] - now
+        self.mark_curve.setData(np.repeat(m, 2), np.tile([-0.1, 1.1], len(m)), connect="pairs")
         h = self.engine.history()
         if len(h):
-            h = h[h[:, 0] >= now - HISTORY_S - 1]
+            h = h[h[:, 0] >= lo]
         if len(h) == 0:
             for c in (self.s_curve, self.soft_curve):
                 c.setData([], [])
@@ -585,6 +1502,8 @@ class LiveClassifierDashboard(QtWidgets.QWidget):
         else:
             log_line = (f"Log: {log.folder.name} · rows {sum(log.written.values())} · dropped "
                         f"{log.dropped}" + (f" · <b>error {log.error}</b>" if log.error else ""))
+        st = snap.stabilization
+        sc = st.counters
         lines = [
             (f"Model window {m.window_samples} samples / {m.hop_samples}-sample hop"
              if m else "Model window: --"),
@@ -602,8 +1521,15 @@ class LiveClassifierDashboard(QtWidgets.QWidget):
             f"{c.get('rejected_samples', 0)}",
             f"Resets: {resets} · stale events {c.get('stale_events', 0)} · errors "
             f"{c.get('errors', 0)}",
+            f"Stabilization rev {st.revision} {'ON' if st.enabled else 'OFF'}: raw class changes "
+            f"{sc.get('raw_changes', 0)} · accepted {sc.get('accepted_changes', 0)} "
+            f"(+{sc.get('initial_acceptances', 0)} initial) · cancelled "
+            f"{sc.get('cancelled_candidates', 0)} · gate fails {sc.get('gate_failures', 0)} · "
+            f"hold expiries {sc.get('unsupported_expiries', 0)} · update "
+            f"{_fmt_ms(t['stabilization_ms'])}",
             log_line,
             "<small>Host-side only: not contraction-to-display, sensor→host or "
-            "display-onset latency.</small>",
+            "display-onset latency. A stabilization confirmation (receipt-time evidence) "
+            "adds to all delays above.</small>",
         ]
         self.diag_label.setText("<div align='left'>" + "<br>".join(lines) + "</div>")
