@@ -33,7 +33,7 @@ import numbers
 from dataclasses import asdict, dataclass, fields
 from typing import List, NamedTuple, Optional
 
-LABELS = ("low", "medium", "high")
+LABELS = ("low", "medium", "high")       # known labels; a model may use a subset (>= 2)
 S_VALUE = {"low": 0.0, "medium": 0.5, "high": 1.0}
 ALGORITHM = "persistence_confirmation"
 ALGORITHM_VERSION = 1
@@ -265,9 +265,9 @@ class Stabilizer:
             self.counters["reset:context_change"] += 1
         self._ctx = ctx
         probs = ob.probabilities or {}
-        if not (ob.valid and ob.label in S_VALUE and all(
-                isinstance(probs.get(l), numbers.Real) and not isinstance(probs[l], bool)
-                and math.isfinite(probs[l]) for l in LABELS)):
+        if not (ob.valid and ob.label in probs and len(probs) >= 2 and all(
+                l in S_VALUE and isinstance(v, numbers.Real) and not isinstance(v, bool)
+                and math.isfinite(v) for l, v in probs.items())):
             self._clear("invalid_prediction")
             self.counters["reset:invalid_prediction"] += 1
             return self._row("observe", now, ob, "invalid_prediction")

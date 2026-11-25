@@ -28,8 +28,9 @@ MLP_MODEL = Path(os.environ.get(
     "GFORCE_LIVE_MLP_MODEL",
     REPO.parent / "emg-stiffness-data/runs/mlp_hold_30w_seed42_001/model.joblib"))
 MLP_SHA256 = "f97c2af2299f92412cf379347fb992aad09630290fa178ddfc5d7616fd2e0d7d"
-# installed wheel = classifier 5e86bd4 = the MLP's training sources
-INSTALLED_CODE_SHA256 = "90d119ab0de2e8f58e401c6010ffee891f9889f12461edbb799b4b63340412b2"
+MLP_CODE_SHA256 = "90d119ab0de2e8f58e401c6010ffee891f9889f12461edbb799b4b63340412b2"   # 5e86bd4
+# installed wheel = the binary S2.1 model's training sources (channel / class subsets)
+INSTALLED_CODE_SHA256 = "618f3861d656bcc31908b115133cc15942bc9dd07c1166e1a16748c8c487f44b"
 
 needs_model = pytest.mark.skipif(not (classifier_status()[0] and MODEL.is_file()),
                                  reason="emg-classifier or the selected model not available")
@@ -148,7 +149,7 @@ def test_selected_artifact_is_the_final_short_window_model(model):
     # fitted on all 51 eligible trials x 10 windows, not a CV-fold model
     assert model.training["n_trials"] == 51 and model.training["n_windows"] == 510
     assert int(steps[0][1].n_samples_seen_) == 510
-    # trained with c347549 sources; the installed 5e86bd4 only adds the MLP (same LDA path)
+    # trained with c347549 sources; the installed wheel adds the MLP and subsets (same LDA path)
     assert model.code_sha256 == CODE_SHA256
     assert model.installed_code_sha256 == INSTALLED_CODE_SHA256
     assert len(model.warnings) == 1 and "sources" in model.warnings[0]
@@ -169,8 +170,9 @@ def test_mlp_artifact_is_accepted(mlp):
     assert [type(e).__name__ for _, e in steps] == ["StandardScaler", "MLPClassifier"]
     assert mlp.training["n_trials"] == 51 and mlp.training["n_windows"] == 1530
     assert int(steps[0][1].n_samples_seen_) == 1530
-    assert mlp.code_sha256 == mlp.installed_code_sha256 == INSTALLED_CODE_SHA256
-    assert mlp.warnings == ()
+    assert mlp.code_sha256 == MLP_CODE_SHA256
+    assert mlp.installed_code_sha256 == INSTALLED_CODE_SHA256
+    assert len(mlp.warnings) == 1 and "sources" in mlp.warnings[0]
 
 
 @needs_model
@@ -366,7 +368,7 @@ def _artifact(tmp_path, edit=None, sidecar=True, name="model.joblib"):
     ("no_window", lambda o: o["metadata"].pop("window_samples"), "window"),
     ("ms_units", lambda o: o["metadata"].update(window_units="ms"), "not sample counts"),
     ("feature", lambda o: o["metadata"]["feature"].update(version=2), "feature"),
-    ("classes", lambda o: o["metadata"]["classes"][0].update(s=0.25), "class mapping"),
+    ("classes", lambda o: o["metadata"]["classes"][0].update(s=0.25), "class (mapping|entry)"),
     ("fold_model", lambda o: o["metadata"]["training_set"].update(n_windows=400, n_trials=40),
      "not the final model"),
     ("sklearn", lambda o: o["metadata"]["package_versions"].update(**{"scikit-learn": "0.1"}),

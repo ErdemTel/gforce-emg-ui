@@ -33,14 +33,14 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 from .. import __version__
 from ..collection.storage import git_info
 from ..live import compat, robot_out
-from ..live.engine import (ERROR, INVALID_INPUT, NO_MODEL, READY, RUNNING, STALE, STOPPED,
-                           WARMING_UP, LiveEngine, LiveSettings)
+from ..live.engine import (ERROR, HUB_CHANNELS, INVALID_INPUT, NO_MODEL, READY, RUNNING, STALE,
+                           STOPPED, WARMING_UP, LiveEngine, LiveSettings)
 from ..live.log import LogRootError, PredictionLog, check_root
 from ..live.model import TRUST_NOTE, ModelError, classifier_status, load_trusted_model
 from ..live.robot_out import RobotOutput, RobotOutputSettings
-from ..live.stabilization import (CONFIRMING, GATE_NOT_MET, HOLDING, OFF, PENDING,
-                                  SETTINGS_SCHEMA, UNSUPPORTED, WAITING, StabilizerSettings,
-                                  describe)
+from ..live.stabilization import (CONFIRMING, GATE_NOT_MET, HOLDING, LABELS, OFF, PENDING,
+                                  S_VALUE, SETTINGS_SCHEMA, UNSUPPORTED, WAITING,
+                                  StabilizerSettings, describe)
 from ..sources import DISCONNECTING, FAILED, IDLE, RECONNECTING, STREAMING
 from .collection_panel import LiveText
 from .gain_table_panel import GainTablePanel
@@ -55,6 +55,7 @@ STATE_COLORS = {RUNNING: "#2e7d32", WARMING_UP: "#1565c0", STALE: "#ef6c00",
 LEVEL_TAGS = {compat.OK: ("#2e7d32", "ok"), compat.WARN: ("#ef6c00", "warn"),
               compat.UNKNOWN: ("#ef6c00", "unknown"), compat.BLOCK: ("#c62828", "BLOCK")}
 BAR_COLORS = ("#86b6ef", "#2a78d6", "#104281")   # ordinal blue ramp: low -> high
+DEFAULT_CLASSES = tuple((i, l, S_VALUE[l]) for i, l in enumerate(LABELS))   # until a model loads
 S_COLOR, SOFT_COLOR, STAB_COLOR, MARK_COLOR = "#2a78d6", "#eb6834", "#1b1b1b", "#9e9e9e"
 STAB_COLORS = {OFF: "#757575", WAITING: "#757575", CONFIRMING: "#1565c0", PENDING: "#1565c0",
                HOLDING: "#2e7d32", GATE_NOT_MET: "#ef6c00", UNSUPPORTED: "#c62828"}
@@ -168,15 +169,23 @@ def _esc(text) -> str:
 
 
 class ProbBars(QtWidgets.QWidget):
-    """Three labelled probability bars; paints itself (no relayout on updates)."""
+    """One labelled probability bar per model class; paints itself (no relayout on updates)."""
 
     ROW = 26
 
-    def __init__(self, labels=("low", "medium", "high"), parent=None):
+    def __init__(self, labels=LABELS, parent=None):
         super().__init__(parent)
-        self.labels = tuple(labels)
+        self.labels = ()
         self._p = None
-        self.setFixedHeight(self.ROW * len(self.labels) + 8)
+        self.set_labels(labels)
+
+    def set_labels(self, labels):
+        """The loaded model's classes (relayout once, on model change only)."""
+        labels = tuple(labels)
+        if labels != self.labels:
+            self.labels, self._p = labels, None
+            self.setFixedHeight(self.ROW * len(self.labels) + 8)
+            self.update()
 
     def sizeHint(self):
         return QtCore.QSize(360, self.height())
@@ -210,7 +219,8 @@ class ProbBars(QtWidgets.QWidget):
             text = "--"
             if self._p is not None:
                 v = self._p[i]
-                p.setBrush(QtGui.QColor(BAR_COLORS[i % len(BAR_COLORS)]))
+                k = LABELS.index(label) if label in LABELS else i
+                p.setBrush(QtGui.QColor(BAR_COLORS[k % len(BAR_COLORS)]))
                 p.drawRoundedRect(QtCore.QRectF(x0, y + 4, max(0.0, (x1 - x0) * v),
                                                 self.ROW - 12), 3, 3)
                 text = f"{100 * v:.1f} %"
@@ -233,6 +243,7 @@ class LiveClassifierDashboard(QtWidgets.QWidget):
         self.hub = hub
         self.source = source
         self._clock = clock
+        self._soft_formula = ""
         self.engine = LiveEngine(hub, settings, clock=clock)
         self.store = store if store is not None else settings_store()
         stored, self.stab_note = load_stabilization(self.store, self._stale_ms)
@@ -407,7 +418,7 @@ class LiveClassifierDashboard(QtWidgets.QWidget):
         self.plot.showGrid(y=True, alpha=0.25)
         self.plot.setYRange(-0.1, 1.1, padding=0)
         self.plot.setXRange(-HISTORY_S, 0, padding=0)
-        self.plot.getAxis("left").setTicks([[(0, "0 low"), (0.5, "0.5 medium"), (1, "1 high")]])
+        self._show_classes(DEFAULT_CLASSES)
         self.plot.getAxis("bottom").enableAutoSIPrefix(False)
         self.plot.setLabel("bottom", "host receipt time of the newest window sample (s, 0 = now)")
         self.plot.addLegend(offset=(10, 4), colCount=3)
@@ -791,6 +802,12 @@ class LiveClassifierDashboard(QtWidgets.QWidget):
     def loading(self) -> bool:
         return self._loading is not None
 
+    def _show_classes(self, classes):
+        """Bars, history ticks and the soft-score formula follow the model's classes."""
+        self.bars.set_labels([l for _, l, _ in classes])
+        self.plot.getAxis("left").setTicks([[(s, f"{s:g} {l}") for _, l, s in classes]])
+        self._soft_formula = " + ".join(f"{s:g}·p_{l}" for _, l, s in classes)
+
     def _on_model_loaded(self, result, token: int):
         if token != self._load_token or self._closed:
             return
@@ -801,6 +818,7 @@ class LiveClassifierDashboard(QtWidgets.QWidget):
             try:
                 self.engine.set_model(result)
                 self.model = result
+                self._show_classes(result.classes)
             except ValueError as e:
                 self.load_error = str(e)
         self._show_model()
@@ -815,8 +833,10 @@ class LiveClassifierDashboard(QtWidgets.QWidget):
             html = (f"<b>{m.name}</b> · sha256 {m.sha256[:16]}<br><code>{m.path}</code><br>"
                     f"window {m.window_samples} samples / {m.hop_samples}-sample hop · "
                     f"{len(m.channel_names)} × {m.feature.get('name')} "
-                    f"v{m.feature.get('version')} ({', '.join(m.channel_names[:1])}…"
-                    f"{m.channel_names[-1]})<br>"
+                    f"v{m.feature.get('version')} ({', '.join(m.channel_names)}"
+                    + ("; not used: " + ", ".join(c for c in HUB_CHANNELS
+                                                 if c not in m.channel_names)
+                       if len(m.channel_names) < len(HUB_CHANNELS) else "") + ")<br>"
                     f"classes {', '.join(f'{c}={l} (s={s:g})' for c, l, s in m.classes)}<br>"
                     f"fitted on {m.training.get('n_trials')} trials / "
                     f"{m.training.get('n_windows')} windows · scikit-learn "
@@ -1095,7 +1115,7 @@ class LiveClassifierDashboard(QtWidgets.QWidget):
         explanation = ROBOT_CONFIRM
         if self.emg_producer:
             explanation = (
-                "Publish the displayed low / medium / high activation prediction. "
+                f"Publish the displayed {' / '.join(self.bars.labels)} activation prediction. "
                 "Sharpa Control owns robot arming, gain selection and applied-gain status. "
                 "Starting this stream does not start robot control. A successful UDP send "
                 "does not confirm that the controller received or applied a prediction.")
@@ -1435,7 +1455,7 @@ class LiveClassifierDashboard(QtWidgets.QWidget):
         self.stab_label.setColors(STAB_COLORS.get(status, "#757575"), "white")
         self.bars.set_probabilities(p.probabilities if p is not None else None)
         self.soft_label.setText(
-            f"soft class score {p.s_expected:.2f}<br><small>0·p_low + 0.5·p_medium + 1·p_high; "
+            f"soft class score {p.s_expected:.2f}<br><small>{self._soft_formula}; "
             f"not stiffness, not a confidence</small>" if p is not None
             else "soft class score --")
 

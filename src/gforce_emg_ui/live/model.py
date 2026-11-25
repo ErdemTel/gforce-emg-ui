@@ -177,6 +177,11 @@ def load_trusted_model(path) -> LoadedModel:
     if N != clf.window_samples:
         raise ModelError(f"window_samples {N} disagrees with the classifier ({clf.window_samples})")
     channels = tuple(_need(meta, "channel_names", list, "channel order"))
+    if (not channels or len(set(channels)) != len(channels)
+            or any(c not in constants.CHANNELS for c in channels)
+            or list(channels) != sorted(channels, key=constants.CHANNELS.index)):
+        raise ModelError(f"channel_names {list(channels)} are not an ordered subset of "
+                         f"{', '.join(constants.CHANNELS)}")
     feature = _need(meta, "feature", dict, "feature definition")
     if (feature.get("name"), feature.get("version")) != (features.FEATURE_NAME,
                                                          features.FEATURE_VERSION):
@@ -193,8 +198,10 @@ def load_trusted_model(path) -> LoadedModel:
                              f"{constants.CLASS_ID} / {constants.S_VALUE}")
         classes.append((int(cid), str(label), float(s)))
     classes.sort()
-    if [c[0] for c in classes] != list(constants.CLASS_IDS):
-        raise ModelError(f"classes {classes} are not exactly {constants.CLASS_IDS}")
+    ids = [c[0] for c in classes]
+    if len(ids) < 2 or len(set(ids)) != len(ids):
+        raise ModelError(f"classes {classes}: need at least two distinct classes of "
+                         f"{constants.CLASS_IDS}")
 
     steps = getattr(clf.pipeline, "steps", None) or []
     kinds = [type(est).__name__ for _, est in steps]
@@ -203,8 +210,8 @@ def load_trusted_model(path) -> LoadedModel:
     if getattr(clf.pipeline, "n_features_in_", None) != len(channels):
         raise ModelError(f"model expects {getattr(clf.pipeline, 'n_features_in_', None)} "
                          f"features, metadata lists {len(channels)} channels")
-    if sorted(int(c) for c in clf.pipeline.classes_) != list(constants.CLASS_IDS):
-        raise ModelError(f"model.classes_ {list(clf.pipeline.classes_)} != {constants.CLASS_IDS}")
+    if sorted(int(c) for c in clf.pipeline.classes_) != ids:
+        raise ModelError(f"model.classes_ {list(clf.pipeline.classes_)} != metadata classes {ids}")
 
     training = _need(meta, "training_set", dict, "training set")
     n_trials, n_windows = training.get("n_trials"), training.get("n_windows")

@@ -435,6 +435,12 @@ older `lda_hold_001` and `mlp_hold_30w_seed42_001` (51 trials) stay accepted and
 files the real-model tests pin (sha256, trial counts): do not point the test variables
 below at the 77-trial model.
 
+Two-class model (low / high only, ch6 left out: poor contact in S2.1):
+`../emg-stiffness-data/runs/mlp_s21_7ch_binary_seed42_001/model.joblib` (`train-subset`,
+20 S2.1 trials / 600 windows; development CV 20/20 trials, window BA 0.994; leave-one-block-out
+20/20). The engine feeds only the model's channels; bars, history ticks and the soft score
+follow the model's classes (no medium). Needs a classifier wheel with channel / class subsets.
+
 Use: connect the band → **Live Classifier** → *Load model…* (a trusted local
 `model.joblib`; joblib/pickle runs code, nothing loads automatically) → review
 *Compatibility* (incompatible settings block Start; warnings need a tick, which covers Start
