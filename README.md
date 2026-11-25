@@ -411,14 +411,14 @@ Sharpa stiffness bridge, which decides what the hand does.
 
 Install the classifier into this `.venv` (pins = the model's training environment; nothing
 else is upgraded). Clone the private data repo next to this one
-(`git clone -b classifier https://github.com/ErdemTel/emg-stiffness-data.git`; it contains the
+(`git clone https://github.com/ErdemTel/emg-stiffness-data.git`, branch `main`; it contains the
 models `runs/lda_hold_001/model.joblib` (LDA) and `runs/mlp_hold_30w_seed42_001/model.joblib`
 (MLP); both are accepted), then from this folder (Windows: same
 commands in PowerShell with `.venv\Scripts\pip`). Needs a 64-bit Python 3.12–3.14 `.venv` (the pinned
 numpy / scipy have no older wheels; pip then reports a numpy "conflict"):
 
 ```bash
-git --git-dir=../emg-stiffness-data/.git archive -o ../clf.tar classifier pyproject.toml README.md src
+git --git-dir=../emg-stiffness-data/.git archive -o ../clf.tar main pyproject.toml README.md src
 mkdir ../clf
 tar -xf ../clf.tar -C ../clf
 .venv/bin/pip wheel --no-deps -w ../clf/wheels ../clf
