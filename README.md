@@ -211,6 +211,12 @@ each (data collection only). Raw files are the same as for manual recordings.
 .venv/bin/python -m gforce_emg_ui --simulate                       # software test
 ```
 
+**Folder mode** (default; Plan / Manual are hidden): *1. Folder* → *Choose…*, *2. Stiffness*
+→ 0 or 1, *Start trial*. Same protocol, files and review. Attempts are saved directly in the
+folder (simulation: `<folder>/simulated/`). `trial.json`: 0 = `low` (s 0.0), 1 = `high`
+(s 1.0); object / posture `unspecified`, stationary, role `development` without a plan;
+participant / session = parent / folder name; trial IDs m001, m002, …
+
 **Protocol** (durations editable under *Protocol & plan settings*, saved per trial):
 PREPARE 5 s → SETTLE 3 s → **HOLD 5 s** (only training candidate) → REST 15 s, then stop,
 save and review. *Extend rest* adds 15 s; *Abort* instead of pausing. Next trial starts

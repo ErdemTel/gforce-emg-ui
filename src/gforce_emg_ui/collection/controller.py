@@ -25,6 +25,9 @@ the spec and its selection provenance for the attempt. Surface press is
 stationary only: choosing it as the object also sets the movement to stationary.
 Open hand keeps the requested movement.
 
+Folder mode (open_folder): no plan, participant or object; attempts are saved
+directly in the chosen folder as unplanned development trials.
+
 extend_plan appends one task condition's trials (30 surface press or 35 open
 hand) to the selected plan file on the I/O thread (idle only; Start, plan and
 participant changes wait until it finished).
@@ -32,6 +35,7 @@ participant changes wait until it finished).
 
 import copy
 import json
+import re
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -46,8 +50,9 @@ from .plan import (EMPTY_HAND, EXTENDABLE, EXTENSIONS, INCOMPATIBLE, MANUAL_SELE
                    MAX_TARGET_RUN, OBJECTS_FILE, SELECTION_FIELDS, SELECTION_RULE,
                    TASK_CONDITIONS, TASKS, Progress, TrialPlan, attempt_category,
                    compute_progress, eligible_trials, extend_plan_file, extension_status,
-                   load_objects, merge_objects, objects_doc, participant_root, pick_trial,
-                   resolve_request, run_banned_target, scan_participant, trial_values)
+                   folder_root, load_objects, merge_objects, objects_doc, participant_root,
+                   pick_trial, resolve_request, run_banned_target, scan_participant,
+                   trial_values)
 from .protocol import (DONE, HOLD, LABEL_SEMANTICS, MOTIONS, PHASES, PROTOCOL_VERSION,
                        SCHEMA_VERSION, STATIONARY, SURFACE_PRESS, TARGETS,
                        TRAINING_CANDIDATE_PHASE, ProtocolEvent, ProtocolSettings,
@@ -85,6 +90,7 @@ ABORT_REASONS = {
     "timing_overrun": "phase timing overrun (GUI delayed)",
     "app_close": "application closed",
 }
+FOLDER_OBJECT = "unspecified"           # folder mode: no object / posture recorded
 TRIAL_SCHEMA = "gforce_emg_ui.stiffness_trial"
 TIME_SEMANTICS = {
     "host_mono": "time.monotonic() seconds on the acquisition host; the same timebase as "
@@ -106,6 +112,15 @@ TIME_SEMANTICS = {
 }
 
 
+def folder_ids(folder: Path) -> Tuple[str, str]:
+    """Folder mode: (participant_id, session_id) from the parent / folder names."""
+    def safe(name):
+        name = re.sub(r"[^A-Za-z0-9_-]+", "_", name).strip("_")[:32]
+        return name if valid_id(name) else "unknown"
+    folder = Path(folder).absolute()
+    return safe(folder.parent.name), safe(folder.name)
+
+
 @dataclass
 class TrialSpec:
     participant_id: str = ""
@@ -123,6 +138,7 @@ class TrialSpec:
     notes: str = ""
     planned_trial: Optional[dict] = None     # plan mode: plan.trials[i]
     plan_id: Optional[str] = None
+    folder: Optional[Path] = None            # folder mode: attempts saved directly here
 
     @property
     def trial_id(self) -> str:
@@ -159,7 +175,7 @@ class TrialSpec:
             if self.posture_id != task.posture_id:
                 p.append(f"{task.short} posture is {task.posture_id}")
         if self.planned_trial is None:
-            if self.dataset_role == "development":
+            if self.dataset_role == "development" and self.folder is None:
                 p.append("Development trials come from the plan (use Plan mode)")
             if not 1 <= int(self.trial_number) <= 999:
                 p.append("Trial number: 1-999")
@@ -246,6 +262,7 @@ class CollectionController:
         self._git = self.io.submit(git_info)
 
         self.output_root: Optional[Path] = None
+        self.folder: Optional[Path] = None       # folder mode (open_folder)
         self.participant_id: Optional[str] = None
         self.records: Dict[str, dict] = {}
         self.plans: List[TrialPlan] = []
@@ -319,10 +336,33 @@ class CollectionController:
         return participant_root(output_root or self.output_root,
                                 participant_id or self.participant_id, self.is_simulation)
 
+    def records_root(self) -> Path:
+        """Folder holding this context's attempts (participant mode: their sessions)."""
+        if self.folder is not None:
+            return folder_root(self.folder, self.is_simulation)
+        return self.participant_root()
+
+    def open_folder(self, folder: Path) -> bool:
+        """Folder mode: load the attempts saved directly in `folder` (no plans)."""
+        if self.state != IDLE or self.extending:
+            return False
+        self.folder = self.output_root = Path(folder)
+        self.participant_id = folder_ids(folder)[0]
+        self.records, self.plans, self.plan = {}, [], None
+        self.plan_cursor, self.progress, self.unreadable = None, None, []
+        self._set_pending(None)
+        root = self.records_root()
+        fut = self.io.submit(lambda: {"objects": merge_objects(None),
+                                      **scan_participant(root, "*/trial.json", False)})
+        self._scan = (fut, root)
+        self._recompute()
+        return True
+
     def open_participant(self, output_root: Path, participant_id: str) -> bool:
         """(Re)load plans, attempts and the object catalog on the I/O thread."""
         if self.state != IDLE or self.extending:
             return False
+        self.folder = None
         self.output_root = Path(output_root)
         self.participant_id = participant_id if valid_id(participant_id) else None
         self.records, self.plans, self.plan = {}, [], None
@@ -539,7 +579,7 @@ class CollectionController:
     def create_plan(self, seed: Optional[int] = None) -> Optional[TrialPlan]:
         """Generate a plan; it is usable only after its file was written."""
         if self.participant_id is None or self._plan_write is not None or self.state != IDLE \
-                or self._plan_extend is not None:
+                or self._plan_extend is not None or self.folder is not None:
             return None
         plan = TrialPlan.create(self.participant_id, self.data_source, seed)
         path = self.participant_root() / plan.filename
@@ -641,7 +681,8 @@ class CollectionController:
         if self._plan_extend is not None:
             b.append("Plan update in progress")
         elif (self.participant_id != spec.participant_id or self.output_root is None
-              or Path(spec.output_root) != self.output_root):
+              or Path(spec.output_root) != self.output_root
+              or (None if spec.folder is None else Path(spec.folder)) != self.folder):
             b.append("Participant data not loaded")
         if spec.planned_trial is not None:
             if self.plan is None or self.plan.plan_id != spec.plan_id:
@@ -669,8 +710,9 @@ class CollectionController:
         target = TARGETS[spec.target_label]
         attempt_id = uuid.uuid4().hex[:8]
         number = self.next_attempt_number(spec)
-        session_root = participant_root(spec.output_root, spec.participant_id,
-                                        self.is_simulation) / spec.session_id
+        session_root = (folder_root(spec.folder, self.is_simulation) if spec.folder is not None
+                        else participant_root(spec.output_root, spec.participant_id,
+                                              self.is_simulation) / spec.session_id)
         try:
             name = attempt_name(spec.object_id, spec.target_label, target["s"], spec.trial_id,
                                 number, attempt_id, spec.dataset_role)
@@ -933,7 +975,7 @@ class CollectionController:
         if self._scan is not None and self._scan[0].done():
             fut, proot = self._scan
             self._scan = None
-            if self.participant_id is not None and proot == self.participant_root():
+            if self.participant_id is not None and proot == self.records_root():
                 try:
                     res = fut.result()
                 except Exception as e:

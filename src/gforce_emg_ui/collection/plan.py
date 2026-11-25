@@ -135,6 +135,11 @@ def participant_root(output_root: Path, participant_id: str, simulated: bool) ->
     return (root / SIMULATED_DIR / participant_id) if simulated else (root / participant_id)
 
 
+def folder_root(folder: Path, simulated: bool) -> Path:
+    """Folder mode: attempts directly in <folder>; simulated: <folder>/simulated."""
+    return Path(folder) / SIMULATED_DIR if simulated else Path(folder)
+
+
 def _weighted_order(cells: Dict[tuple, int], seed: int, max_run: int) -> List[tuple]:
     """Random order of cells (cell[1] = target) weighted by remaining counts, with
     no run of more than max_run identical targets. Deterministic for a seed."""
@@ -553,20 +558,22 @@ def extend_plan_file(path: Path, expected: TrialPlan, seed: Optional[int] = None
 
 # -- attempts on disk ------------------------------------------------------------
 
-def scan_participant(proot: Path) -> dict:
-    """Plans (newest first) and attempt records under one participant folder.
+def scan_participant(proot: Path, attempts: str = "*/*/trial.json",
+                     with_plans: bool = True) -> dict:
+    """Plans (newest first) and attempt records under one participant folder
+    (folder mode: attempts="*/trial.json", with_plans=False).
 
     Runs on the I/O thread. Unreadable files are listed, never guessed at.
     """
     proot = Path(proot)
     plans, records, unreadable = [], {}, []
     if proot.is_dir():
-        for p in sorted(proot.glob("plan_*.json")):
+        for p in sorted(proot.glob("plan_*.json")) if with_plans else ():
             try:
                 plans.append(TrialPlan.from_dict(read_json(p)))
             except Exception as e:
                 unreadable.append(f"{p}: {e}")
-        for p in sorted(proot.glob("*/*/trial.json")):
+        for p in sorted(proot.glob(attempts)):
             try:
                 rec = read_json(p)
                 rec["_path"] = str(p)
